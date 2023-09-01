@@ -17,7 +17,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 */
 
 
-#define hwversion 1
+#define hwversion 2
 
 #include <MIDI.h>
 
@@ -30,6 +30,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 /* Pins */
 
+#if (hwversion <= 1)
 #define ledPin 1
 #define adc1Pin 15
 #define adc2Pin 16
@@ -43,11 +44,34 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define sdiPin 11
 #define sdoPin 12
 #define screenCSPin 10
-#define screenVinPin 3
+#define backlightPin 3
 #define screenDCPin 9
-
 #define touchCSPin 8
+#endif
 
+#if (hwversion == 2)
+#define mutePin 0
+#define touchIrqPin 1
+#define i2sOutPin 2
+#define i2sLRClkPin 3
+#define i2sBClkPin 4
+#define shiftRegisterClockPin 5
+#define touchCSPin 6
+#define shiftRegisterOutPin 7
+#define ledPin 8
+#define screenDCPin 9
+#define screenCSPin 10
+#define sdiPin 11
+#define sdoPin 12
+#define sckPin 13
+#define adc4Pin 15
+#define adc3Pin 16
+#define adc2Pin 17
+#define adc1Pin 18
+#define backlightPin 19
+#define midiOutPin 20
+#define midiInPin 21
+#endif
 
 /* Serial */
 
@@ -145,7 +169,99 @@ void adcSetup() {
   adc->adc1->setSamplingSpeed(sampleSpeed);
 }
 
-void readADCs(bool verbose, int* values) {
+int otherChannel(int thisChannel) {
+  switch (thisChannel) {
+    case (0): return 2;
+    case (1): return 3;
+    case (2): return 0;
+    case (3): return 1;
+  }
+  return 0;
+}
+
+/* 
+ * Determine how many microseconds to pause before reading ADCs,
+ * to give cicuit time to settle.  We look at the immediate previous
+ * 4 values read, and the values for the current 4 as of the last
+ * update.  If the difference is large on any channel, then we wait longer.
+ */
+int getADCDelay(int *prev, int *curr) {
+  int maxDelay = 12;
+  for (int channel = 0; channel < 4; channel++) {
+    int delta = prev[channel] - curr[channel];
+    if (delta < 0) {
+      delta = -delta;
+    }
+
+    int delay = delta / 100;
+    if (delay > maxDelay) {
+      maxDelay = delay;
+    }
+  }
+  return maxDelay;
+}
+
+/*
+ * Compensate for tendency for values to "bleed over" between readings
+ * on adjacent channels
+ */
+int deaverage(int a, int b) {
+  int delta = (a - b) / 10;
+  if (a <= b) {
+    return a;
+  }
+  a += delta;
+  
+  if (a < 0) {
+    return 0;
+  }
+  
+  if (a > 4095) {
+    return 4095;
+  }
+  return a;
+}
+
+void deaverage4(int inputs[], int outputs[]) {
+  for (int i = 0; i < 4; i++) {
+    outputs[i] = inputs[i];
+    for (int j = 0; j < 4; j++) {
+      if (i==j) {
+        continue;
+      }
+
+      int delta = inputs[i] - inputs[j];
+      if (delta > 0) {
+        outputs[i] += delta/6; 
+      }
+    }
+
+    if (outputs[i] > 4095) {
+      outputs[i] = 4095;
+    }
+  }
+}
+
+int deblur(int prev, int cur) {
+  int delta = cur - prev;
+  if (delta < 0) {
+    return cur;
+  }
+
+  int adjust = delta / 20;
+  if (adjust > 100) {
+    adjust = 100;
+  }
+
+  int updated = cur + adjust;
+  if (updated > 4095) {
+    return 4095;
+  }
+
+  return updated;
+}
+
+void readADCs(bool verbose, int *values) {
   /*
   for (int i=0; i < adcChannels; i++) {
     values[i] = adc->adc0->analogRead(adcPins[i]);
@@ -155,17 +271,31 @@ void readADCs(bool verbose, int* values) {
   adc->adc1->startSingleRead(adcPins[1]);
 
   while(!adc->adc0->isComplete()) {};
-  values[0] = adc->adc0->readSingle();
+  int value0 = adc->adc0->readSingle();
   while(!adc->adc1->isComplete()) {};
-  values[1] = adc->adc1->readSingle();
+  int value1 = adc->adc1->readSingle();
+
+  delayMicroseconds(1);
 
   adc->adc0->startSingleRead(adcPins[2]);
   adc->adc1->startSingleRead(adcPins[3]);
 
   while(!adc->adc0->isComplete()) {};
-  values[2] = adc->adc0->readSingle();
+  int value2 = adc->adc0->readSingle();
   while(!adc->adc1->isComplete()) {};
-  values[3] = adc->adc1->readSingle();
+  int value3 = adc->adc1->readSingle();
+
+
+  int preAverage [] = {value0, value1, value2, value3};
+  deaverage4(preAverage, values);
+
+
+  /*
+  values[0] = deaverage(value0, value2);
+  values[1] = deaverage(value1, value3);
+  values[2] = deaverage(value2, value0);
+  values[3] = deaverage(value3, value1);
+  */
 
   if (verbose) {
     for (int i=0; i<adcChannels; i++) {
@@ -212,10 +342,18 @@ void shiftRegisterClock() {
 #define TFT_MISO    sdoPin
 ILI9341_t3 tft = ILI9341_t3(TFT_CS, TFT_DC, TFT_RST, TFT_MOSI, TFT_SCLK, TFT_MISO);
 
+#define screenMenuLen 32
+
+struct menuItem {
+  char text[screenMenuLen+1];
+  void *click();
+};
+
 void screenSetup() {
-  pinMode(screenVinPin, OUTPUT);
-  analogWrite(screenVinPin, 255);
+  pinMode(backlightPin, OUTPUT);
+  analogWrite(backlightPin, 32);
   tft.begin();
+  tft.setRotation(1);
   //tft.setClock(10000000);
   tft.fillScreen(ILI9341_BLUE);
   tft.setTextColor(ILI9341_YELLOW);
@@ -237,38 +375,58 @@ void screenSetup() {
 
 /* MIDI */
 
-#define useUsbMidi 1
+//#define useUsbMidi 1
 
-#if (!useUsbMidi)
-MIDI_CREATE_INSTANCE(HardwareSerial, Serial5, dinMidiOut);
-#else
-#define dinMidiOut usbMIDI
-#endif
+bool useUsbMidi = true;
+bool useDinMidi = false;
+
+MIDI_CREATE_INSTANCE(HardwareSerial, Serial5, dinMidi);
+
+//#define MIDI usbMidi
+
+#define doMidi(func, ...) {if (useUsbMidi) {usbMIDI.func(__VA_ARGS__);} if (useDinMidi) {dinMidi.func(__VA_ARGS__);}}
+
+void midiNoteOn(uint8_t note, uint8_t velocity, uint8_t channel) {
+  doMidi(sendNoteOn, note, velocity, channel);
+}
+
+void midiNoteOff(uint8_t note, uint8_t velocity, uint8_t channel) {
+  doMidi(sendNoteOff, note, velocity, channel);
+}
+
+void midiPitchBend(int16_t pb, uint8_t channel) {
+  doMidi(sendPitchBend, pb, channel);
+}
+
+void midiAfterTouch(uint8_t volume, uint8_t channel) {
+  doMidi(sendAfterTouch, volume, channel);
+}
+
+void midiControlChange(uint8_t cc, uint8_t value, uint8_t channel) {
+  doMidi(sendControlChange, cc, value, channel);
+}
+
+void midiProgramChange(uint8_t bank, uint8_t channel) {
+  doMidi(sendProgramChange, bank, channel);
+}
 
 //MIDI_CREATE_INSTANCE(HardwareSerial, Serial1, dinMidiIn);
 int midiBufferSize = 0;
 
 void midiSetup(){
-#if (!useUsbMidi)
-  dinMidiOut.begin();
-#endif
-  //dinMidiIn.begin();
-
-//  midiBufferSize = Serial5.availableForWrite();
+  dinMidi.begin();
   midiBufferSize = 20;
-
-/*
-  for (int i=0; i<10; i++) {
-    usbMIDI.sendNoteOn(i+60, 127, 1);
-    delayMicroseconds(10000);
-    usbMIDI.sendNoteOff(i+60, 127, 1);
-    delayMicroseconds(10000);
-  }
-  */
 }
 
 int midiBufferInUse() {
-  return midiBufferSize - Serial5.availableForWrite();
+  if (useDinMidi) {
+    int inUse = midiBufferSize - Serial5.availableForWrite();
+    if (inUse < 0) {
+      return 0;
+    }
+    return inUse;
+  }
+  return 0;
 }
 
 bool midiReady() {
@@ -297,6 +455,7 @@ struct MpeChannelState{
   uint32_t volumeAge;
   uint8_t lastBankMsb;
   uint8_t lastBankLsb;
+  double originalPitch;
 };
 
 struct MpeChannelState mpeState[16];
@@ -339,7 +498,7 @@ struct MpeChannelState *getMpeChannel() {
   if (state->playing  && state->age > 100000) {
     /* steal note */
     Serial.println("stealing note");
-    dinMidiOut.sendNoteOff(state->lastNote, 127, bestChannel);
+    midiNoteOff(state->lastNote, 127, bestChannel);
     state->playing = false;
     noteOffCount++;
     return state;
@@ -354,6 +513,10 @@ struct MpeChannelState *getMpeChannel() {
 
 #define middleC 60 /* midi note */
 double pbRange = 2.0;
+double pbManualUpRange = 2.0;
+double pbManualUpValue = 0.0;
+double pbManualDownRange = 2.0;
+double pbManualDownValue = 0.0;
 
 //uint8_t pressureCC = 0x01; /* mod wheel bsp expression */
 //uint8_t pressureCC = 0x07; /* volume fb-01 xv-2020 */
@@ -388,6 +551,7 @@ int pressureBackoff = 5000;
 
 struct MpeChannelState *beginMpeNote(double pitch, int owner, double velocity, double pressure) {
   double shift = pitchToCents(pitch * transpose);
+  //state->originalPitch = shift;
 
   int semitones = shift / 100.0;
   double cents = shift - (semitones * 100.0);
@@ -450,39 +614,39 @@ struct MpeChannelState *beginMpeNote(double pitch, int owner, double velocity, d
     if (midiType != mpe) {
 
       if (state->lastBankMsb != mpeBankMsb) {
-        dinMidiOut.sendControlChange(0, mpeBankMsb, state->channel+1);
+        midiControlChange(0, mpeBankMsb, state->channel+1);
         state->lastBankMsb = mpeBankMsb;
       }
 
       if (state->lastBankLsb != mpeBankLsb) {
-        dinMidiOut.sendControlChange(32, mpeBankLsb, state->channel+1);
+        midiControlChange(32, mpeBankLsb, state->channel+1);
         state->lastBankLsb = mpeBankLsb;
       }
 
       if (state->lastProgramChangeSent != programChange) {
-        dinMidiOut.sendProgramChange(programChange, state->channel+1);
+        midiProgramChange(programChange, state->channel+1);
         state->lastProgramChangeSent = programChange;
         Serial.print("sent program change on channel ");
         Serial.println(state->channel);
 
-        dinMidiOut.sendControlChange(100, 0, state->channel+1);
-        dinMidiOut.sendControlChange(101, 0, state->channel+1);
-        dinMidiOut.sendControlChange(6, 2, state->channel+1);
+        midiControlChange(100, 0, state->channel+1);
+        midiControlChange(101, 0, state->channel+1);
+        midiControlChange(6, 2, state->channel+1);
 
         /* turn down resonance */
-        dinMidiOut.sendControlChange(71, 0, state->channel+1);
+        midiControlChange(71, 0, state->channel+1);
         /* turn up the reverb */
-        dinMidiOut.sendControlChange(91, 127, state->channel+1);
+        midiControlChange(91, 127, state->channel+1);
         Serial.println("set pitchbend range to 2");
       }
     }
-    dinMidiOut.sendPitchBend(pb, state->channel+1);
+    midiPitchBend(pb, state->channel+1);
 
     state->volumeAge = pressureBackoff;
     continueMpeNote(state, pressure, 0);
 
 
-    dinMidiOut.sendNoteOn(note, v, state->channel+1);
+    midiNoteOn(note, v, state->channel+1);
     noteOnCount++;
     Serial.print("sent note-on on channel ");
     Serial.print(state->channel+1);
@@ -514,9 +678,9 @@ void continueMpeNote(struct MpeChannelState *state, double pressure, uint32_t de
 
   if(midiReadyLowPriority()) {
     if (midiType == mpe) {
-      dinMidiOut.sendAfterTouch(volume, state->channel+1);
+      midiAfterTouch(volume, state->channel+1);
     } else {
-      dinMidiOut.sendControlChange(pressureCC, volume, state->channel+1);
+      midiControlChange(pressureCC, volume, state->channel+1);
     }
     state->lastVolume = volume;
     state->volumeAge = 0;
@@ -530,7 +694,7 @@ bool endMpeNote(struct MpeChannelState *state) {
   if (midiReady()) {
     state->age = 0;
     state->playing = false;
-    dinMidiOut.sendNoteOff(state->lastNote, 5, state->channel+1);
+    midiNoteOff(state->lastNote, 5, state->channel+1);
     noteOffCount++;
     Serial.print("sent note-off channel ");
     Serial.print(state->channel+1);
@@ -553,22 +717,24 @@ struct MpeSettings {
   uint8_t bankMsbMax;
   uint8_t bankLsbMin;
   uint8_t bankLsbMax;
+  bool useDinMidi;
 };
 
-struct MpeSettings mpeSettingsDefault = {multitimbral, "default", 16, 2.0, 5000, 7, 0, 0, 0, 0};
-struct MpeSettings mpeSettingsXV2020 = {multitimbral, "xv-2020", 16, 2.0, 20000, 7, 87, 87, 64};
-struct MpeSettings mpeSettingsFB01 = {multitimbral, "fb-01", 8, 2.0, 5000, 7, 0, 0, 0, 0};
-struct MpeSettings mpeSettingsKSP = {multitimbral, "keystep pro", 4, 2.0, 5000, 1, 0, 0, 0, 0};
-struct MpeSettings mpeSettingsTrinity = {multitimbral, "trinity", 16, 2.0, 5000, 74, 0, 0, 0, 3};
-struct MpeSettings mpeSettingsSurgeXT = {mpe, "surge-xt", 16, 48.0, 5000, 74, 0, 0, 0, 0};
+struct MpeSettings mpeSettingsDefault = {multitimbral, "default", 16, 2.0, 5000, 7, 0, 0, 0, 0, true};
+struct MpeSettings mpeSettingsXV2020 = {multitimbral, "xv-2020", 16, 2.0, 20000, 7, 87, 87, 64, true};
+struct MpeSettings mpeSettingsFB01 = {multitimbral, "fb-01", 8, 2.0, 5000, 7, 0, 0, 0, 0, true};
+struct MpeSettings mpeSettingsKSP = {multitimbral, "keystep pro", 4, 2.0, 5000, 1, 0, 0, 0, 0, true};
+struct MpeSettings mpeSettingsTrinity = {multitimbral, "trinity", 16, 2.0, 5000, 74, 0, 0, 0, 3, true};
+struct MpeSettings mpeSettingsSurgeXT = {mpe, "surge-xt", 16, 48.0, 5000, 74, 0, 0, 0, 0, false};
 
 void sendMpeZones(){
-  dinMidiOut.sendControlChange(64, 06, 1);
-  dinMidiOut.sendControlChange(65, 00, 1);
-  dinMidiOut.sendControlChange(06, 15, 1);
+  midiControlChange(64, 06, 1);
+  midiControlChange(65, 00, 1);
+  midiControlChange(06, 15, 1);
 }
 
 void applyMpeSettings(struct MpeSettings *settings) {
+  useDinMidi = settings->useDinMidi;
   midiType = settings->midiType;
   pressureBackoff = settings->pressureBackoff;
   pbRange = settings->pbRange;
@@ -588,7 +754,6 @@ void applyMpeSettings(struct MpeSettings *settings) {
     case mpe:
       firstMpeChannel = 1;
       mpeChannels = 15;
-      pbRange = 2.0;
 
       sendMpeZones();
       break;
@@ -615,11 +780,12 @@ void mpeSetup() {
   }
 
   applyMpeSettings(&mpeSettingsSurgeXT);
+  //applyMpeSettings(&mpeSettingsKSP);
 }
 
 /* Setup, Main Loop */
 
-int values[maxShiftRegisterBits][adcChannels];
+int values[maxShiftRegisterBits][adcChannels] = {};
 
 void setLed(int led, int bit, int channel) {
   int value = values[bit][channel];
@@ -759,8 +925,10 @@ struct Control {
     key = nullptr;
     update = nullptr;
     delay = 0;
+    thresholdPressure = 0;
+    maxPressure = 4095;
   };
-  Control(enum ControlType type, int bit, int channel, const char name_[controlNameLen]) : type{type}, bit{bit}, channel{channel} {
+  Control(enum ControlType type, int bit, int channel, const char name_[controlNameLen], uint16_t thresholdPressure, uint16_t maxPressure) : type{type}, bit{bit}, channel{channel}, thresholdPressure{thresholdPressure}, maxPressure{maxPressure} {
     updateFrequency = 1;
     strncpy(name, name_, controlNameLen);
     name[controlNameLen-1] = '\0';
@@ -777,15 +945,18 @@ struct Control {
   struct Key *key;
   char name[controlNameLen];
   void (*update)(struct Control* control, uint32_t deltaUsecs);
+  uint16_t thresholdPressure;
+  uint16_t maxPressure;
 };
 
-#if (hwversion == 0)
-int thresholdPressure = 60;
-int maxPressure = 500;
-#else
-int thresholdPressure = 110;
-int maxPressure = 700;
-#endif
+enum SensorType {
+  sensitronics,
+  velostat,
+  bare
+};
+
+enum SensorType sensorType = velostat;
+
 
 // 1/seconds to fall from full intensity
 double releaseRate = 2.0;
@@ -793,7 +964,8 @@ double releaseRate = 2.0;
 void keyUpdate(struct Control* control, uint32_t deltaUsecs) {
   struct Key *key = control->key;
   int value = values[control->bit][control->channel];
-  int threshold = thresholdPressure;
+  uint16_t threshold = control->thresholdPressure;
+  uint16_t maxPressure = control->maxPressure;
 
   /* debounce */
   if (key->state == playing) {
@@ -824,12 +996,18 @@ void keyUpdate(struct Control* control, uint32_t deltaUsecs) {
   int lastPressure = key->lastPressure;
   key->lastPressure = pressure;
 
+  double intensity = 0.0;
+
+  if (lastPressure > pressure && ((double)lastPressure / (double)maxPressure) > 0.3) {
+    intensity = pow(pressure / (double)maxPressure, 0.4);
+  } else {
+    intensity = pow(pressure / (double)maxPressure, 0.4);
+  }
   
-  double intensity = pow(pressure / (double)maxPressure, 0.4);
-  //double lastIntensity = pow(pressure / (double)maxPressure, 0.4);
-  
-  int delta = pressure-lastPressure;
-  double velocity = pow( ((double)delta * 50.0) / (double)deltaUsecs, 0.4);
+  double delta = (pressure-lastPressure) / (double)maxPressure;
+  double velocity = delta > 0
+    ? pow( ((double)delta * 6000.0) / (double)deltaUsecs, 0.8)
+    : pow( (-(double)delta * 6000.0) / (double)deltaUsecs, 0.8);
   if (velocity > 1.0) {
     velocity = 1.0;
   } else if (velocity < 0.0) {
@@ -849,7 +1027,7 @@ void keyUpdate(struct Control* control, uint32_t deltaUsecs) {
     intensity = 0.0;
   }
 
-  if (pressure > 0 && lastPressure > 0) {
+  if (pressure > 0 && (lastPressure > 0 || velocity == 1.0)) {
     switch (key->state) {
       case idle:
       case releasing:
@@ -928,7 +1106,7 @@ void incProgramChangeUpdate(struct Control* control, uint32_t deltaUsecs) {
   }
 
   int value = values[control->bit][control->channel];
-  int pressure = (4095-value) - thresholdPressure;
+  int pressure = (4095-value) - control->thresholdPressure;
   if (pressure > 0) {
     programChange++;
     control->delay = 100000;
@@ -938,16 +1116,14 @@ void incProgramChangeUpdate(struct Control* control, uint32_t deltaUsecs) {
 }
 
 void decProgramChangeUpdate(struct Control* control, uint32_t deltaUsecs) {
-  if (debounce(control, deltaUsecs)) {
-    return;
-  }
+  check_debounce;
 
   if (programChange == 0) {
     return;
   }
 
   int value = values[control->bit][control->channel];
-  int pressure = (4095-value) - thresholdPressure;
+  int pressure = (4095-value) - control->thresholdPressure;
   if (pressure > 0) {
     programChange--;
     control->delay = 100000;
@@ -957,12 +1133,10 @@ void decProgramChangeUpdate(struct Control* control, uint32_t deltaUsecs) {
 }
 
 void allNotesOffSlowUpdate(struct Control* control, uint32_t deltaUsecs) {
-  if (debounce(control, deltaUsecs)) {
-    return;
-  }
+  check_debounce;
 
   int value = values[control->bit][control->channel];
-  int pressure = (4095-value) - thresholdPressure;
+  int pressure = (4095-value) - control->thresholdPressure;
   if (pressure > 0) {
     for (int channel = firstMpeChannel; channel < firstMpeChannel + mpeChannels; channel++) {
       for (int note = 0; note < 128; note++) {
@@ -970,7 +1144,7 @@ void allNotesOffSlowUpdate(struct Control* control, uint32_t deltaUsecs) {
           delayMicroseconds(100);
         }
         Serial.println("sending note off");
-        dinMidiOut.sendNoteOff(note, 63, channel+1);
+        midiNoteOff(note, 63, channel+1);
       }
     }
 
@@ -980,15 +1154,13 @@ void allNotesOffSlowUpdate(struct Control* control, uint32_t deltaUsecs) {
 }
 
 void allNotesOffUpdate(struct Control* control, uint32_t deltaUsecs) {
-  if (debounce(control, deltaUsecs)) {
-    return;
-  }
+  check_debounce;
 
   int value = values[control->bit][control->channel];
-  int pressure = (4095-value) - thresholdPressure;
+  int pressure = (4095-value) - control->thresholdPressure;
   if (pressure > 0) {
     for (int channel = firstMpeChannel; channel < firstMpeChannel + mpeChannels; channel++) {
-      dinMidiOut.sendControlChange(123, 0, channel+1);
+      midiControlChange(123, 0, channel+1);
     }
 
     control->delay = 100000;
@@ -997,12 +1169,10 @@ void allNotesOffUpdate(struct Control* control, uint32_t deltaUsecs) {
 }
 
 void transposeUpUpdate(struct Control* control, uint32_t deltaUsecs) {
-  if (debounce(control, deltaUsecs)) {
-    return;
-  }
+  check_debounce;
 
   int value = values[control->bit][control->channel];
-  int pressure = (4095-value) - thresholdPressure;
+  int pressure = (4095-value) - control->thresholdPressure;
   if (pressure > 50) {
     transpose *= 2.0;
     if (transpose > 8.0) {
@@ -1013,12 +1183,10 @@ void transposeUpUpdate(struct Control* control, uint32_t deltaUsecs) {
 }
 
 void transposeDownUpdate(struct Control* control, uint32_t deltaUsecs) {
-  if (debounce(control, deltaUsecs)) {
-    return;
-  }
+  check_debounce;
 
   int value = values[control->bit][control->channel];
-  int pressure = (4095-value) - thresholdPressure;
+  int pressure = (4095-value) - control->thresholdPressure;
   if (pressure > 50) {
     transpose *= 0.5;
     if (transpose < 0.25) {
@@ -1029,12 +1197,10 @@ void transposeDownUpdate(struct Control* control, uint32_t deltaUsecs) {
 }
 
 void bankLsbUpUpdate(struct Control* control, uint32_t deltaUsecs) {
-  if (debounce(control, deltaUsecs)) {
-    return;
-  }
+  check_debounce;
 
   int value = values[control->bit][control->channel];
-  int pressure = (4095-value) - thresholdPressure;
+  int pressure = (4095-value) - control->thresholdPressure;
   if (pressure > 0) {
     mpeBankLsb++;
     if (mpeBankLsb > mpeBankLsbMax) {
@@ -1047,12 +1213,10 @@ void bankLsbUpUpdate(struct Control* control, uint32_t deltaUsecs) {
 }
 
 void bankLsbDownUpdate(struct Control* control, uint32_t deltaUsecs) {
-  if (debounce(control, deltaUsecs)) {
-    return;
-  }
+  check_debounce;
 
   int value = values[control->bit][control->channel];
-  int pressure = (4095-value) - thresholdPressure;
+  int pressure = (4095-value) - control->thresholdPressure;
   if (pressure > 0) {
     mpeBankLsb--;
     if (mpeBankLsb < mpeBankLsbMin) {
@@ -1065,12 +1229,10 @@ void bankLsbDownUpdate(struct Control* control, uint32_t deltaUsecs) {
 }
 
 void mpeZoneUpdate(struct Control* control, uint32_t deltaUsecs) {
-  if (debounce(control, deltaUsecs)) {
-    return;
-  }
+  check_debounce;
 
   int value = values[control->bit][control->channel];
-  int pressure = (4095-value) - thresholdPressure;
+  int pressure = (4095-value) - control->thresholdPressure;
   if (pressure > 0) {
     sendMpeZones();
     Serial.println("registering MPE zones");
@@ -1079,9 +1241,9 @@ void mpeZoneUpdate(struct Control* control, uint32_t deltaUsecs) {
 }
 struct Control controls[maxShiftRegisterBits][adcChannels];
 
-#define CONTROL(type, bit, channel, name) (controls[bit][channel] = Control(type, bit, channel, name))
+#define CONTROL(type, bit, channel, name) (controls[bit][channel] = Control(type, bit, channel, name, thresholdPressure, maxPressure))
 
-void controlSetupController() {
+void controlSetupController(uint16_t thresholdPressure, uint16_t maxPressure) {
   for (int i=0; i<4; i++) {
     for (int j=0; j<adcChannels; j++) {
       controls[i][j] = Control();
@@ -1101,8 +1263,13 @@ void controlSetupController() {
   CONTROL(pressure, 1, 1, "nav-down");
   CONTROL(pressure, 2, 1, "button-1");
   CONTROL(pressure, 3, 1, "button-2");
+#if (hwversion < 2)
   CONTROL(pressure, 4, 1, "button-4");
   CONTROL(pressure, 5, 1, "button-3");
+#else
+  CONTROL(pressure, 4, 1, "button-3");
+  CONTROL(pressure, 5, 1, "button-4");
+#endif
   CONTROL(pressure, 6, 1, "button-5");
   CONTROL(pressure, 7, 1, "cal-2k-r15");
 
@@ -1123,6 +1290,9 @@ void controlSetupController() {
   CONTROL(pot, 5, 3, "rv8");
   CONTROL(pot, 6, 3, "rv9");
   CONTROL(pot, 7, 3, "rv10");
+
+  /* control button presses should be a little less sensitive */
+  thresholdPressure += thresholdPressure/2; 
 
   controls[2][1].update = incProgramChangeUpdate;
   controls[3][1].update = decProgramChangeUpdate;
@@ -1161,7 +1331,7 @@ void controlSetupController() {
     keyAllocIdx++; \
   }
 
-void controlSetupKeybed() {
+void controlSetupKeybed(uint16_t thresholdPressure, uint16_t maxPressure) {
   int oct = 0;
   CONTROL(resistor, 8, 0, "id0-20k");
   CONTROL_KEY(1, 1, 4);
@@ -1233,13 +1403,17 @@ void controlSetupKeybed() {
     CONTROL_KEY(29, 63, 128);
   }
 
-  CONTROL(pressure, 8+24+1, 0, "4/1");
+  {
+    int oct = 3;
+    CONTROL_KEY(1, 1, 2);
+  }
   CONTROL(pressure, 8+8+6,  3, "control-1");
   CONTROL(pressure, 8+8+7,  3, "control-2");
   CONTROL(pressure, 8+16+6, 3, "spacebar-up");
   CONTROL(pressure, 8+16+7, 3, "spacebar-dn");
   CONTROL(pressure, 8+24+6, 3, "control-4");
   CONTROL(pressure, 8+24+7, 3, "control-3");
+  
 
   controls[8+8+6][3].update = transposeDownUpdate;
   controls[8+8+7][3].update = transposeUpUpdate;
@@ -1286,11 +1460,39 @@ void setup() {
   ledSetup();
   adcSetup();
   shiftRegisterSetup();
-  //screenSetup();
+  screenSetup();
   midiSetup();
   mpeSetup();
-  controlSetupController();
-  controlSetupKeybed();
+
+  int thresholdPressure = 0;
+  int maxPressure = 4096;
+
+#if (hwversion == 0)
+  thresholdPressure = 60;
+  maxPressure = 500;
+#elif (hwversion == 1)
+  thresholdPressure = 110;
+  maxPressure = 700;
+#else
+  switch (sensorType) {
+    case sensitronics:
+      thresholdPressure = 100;
+      maxPressure = 1000;
+      break;
+    case velostat:
+      Serial.println("using velostat settings");
+      thresholdPressure = 700;
+      maxPressure = 4000;
+      break;
+    case bare:
+      thresholdPressure = 100;
+      maxPressure = 800;
+      break;
+  }
+#endif
+
+  controlSetupController(thresholdPressure, maxPressure);
+  controlSetupKeybed(thresholdPressure, maxPressure);
   delayMicroseconds(100000);
   Serial.println("end setup");
 }
@@ -1302,27 +1504,35 @@ uint32_t prevTimestamp = 0;
 void loop() {
   // put your main code here, to run repeatedly:
   static int iteration = 0;
-  bool verbose = (iteration % 4000 == 0);
+  bool verbose = (iteration % 500 == 0);
+  //verbose = false;
 
-  if (iteration % 2000 == 0) {
+  if (verbose) {
     uint32_t timestamp = micros();
     uint32_t delta = timestamp - prevTimestamp;
 
     Serial.print(iteration);
     Serial.print(" ");
-    Serial.print(2000.0 / ((float)delta / 1000000.0));
+    Serial.print(500.0 / ((float)delta / 1000000.0));
     Serial.print(" midi tx buffer ");
     Serial.println(Serial5.availableForWrite());
     prevTimestamp = timestamp;
   }
 
   int i;
+  uint32_t prev = 0;
   for (i=0; i<maxShiftRegisterBits; i++) {
     //Serial.print(i);
     //Serial.print(" ");
     shiftRegisterClock();
-    delayMicroseconds(10);
+    
+    uint32_t delay = getADCDelay(values[prev], values[i]);
+    delayMicroseconds(delay);
     readADCs(false, values[i]);
+    for (int j=0; j<adcChannels; j++) {
+      values[i][j] = deblur(values[prev][j], values[i][j]);
+    }
+    prev = i;
   }
   shiftRegisterReset(i);
 
@@ -1339,14 +1549,15 @@ void loop() {
     }
   }
 
-  if (verbose)
+  if (verbose) {
     showValues();
+  }
 
   if (iteration % 4 == 0) { 
-    setLed(1, 7, 0); // nav_left
-    setLed(2, 5, 0); // nav_up
-    setLed(3, 1, 1); // nav_down
-    setLed(4, 6, 0); // nav_right
+    //setLed(1, 7, 0); // nav_left
+    //setLed(2, 5, 0); // nav_up
+    //setLed(3, 1, 1); // nav_down
+    //setLed(4, 6, 0); // nav_right
     //readPot(4, 0);
     //readPot(7, 5);
     int surplus = noteOnCount - noteOffCount;
@@ -1358,12 +1569,11 @@ void loop() {
     leds.show();
   }
 
-/*
-  if (dinMidiIn.read()){
+  if (dinMidi.read()){
     int note, channel, velocity;
     bool noteCmd = false;
 
-    byte cmd = dinMidiIn.getType();
+    byte cmd = dinMidi.getType();
     switch(cmd) {
       case midi::NoteOn:
         noteCmd = true;
@@ -1379,15 +1589,15 @@ void loop() {
     }
 
     if (noteCmd) {
-      note = dinMidiIn.getData1();
-      velocity = dinMidiIn.getData2();
-      channel = dinMidiIn.getChannel();
+      note = dinMidi.getData1();
+      velocity = dinMidi.getData2();
+      channel = dinMidi.getChannel();
 
       Serial.print("channel "); Serial.print(channel);
       Serial.print(" note "); Serial.print(note);
       Serial.print(" velocity "); Serial.println(velocity);
     }
   }
-  */
+  
   iteration++;
 }
