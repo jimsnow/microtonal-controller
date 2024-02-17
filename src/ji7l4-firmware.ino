@@ -1,5 +1,5 @@
 /*
-Copyright 2023 Jim Snow
+Copyright 2023-2024 Jim Snow
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -17,7 +17,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 */
 
 
-#define hwversion 2
+#define hwversion 3
 
 #include <MIDI.h>
 
