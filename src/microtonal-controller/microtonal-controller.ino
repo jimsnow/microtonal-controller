@@ -1,5 +1,5 @@
 /*
-Copyright 2023-2024 Jim Snow
+Copyright 2023 Jim Snow
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -477,13 +477,13 @@ void applyCalibration(bool verbose, const float cal[adcChannels][adcChannels], c
   float vNext[adcChannels];
   float rNext[adcChannels];
   float vOrig[adcChannels];
-  float rOrigInv[adcChannels];
+  //float rOrigInv[adcChannels];
 
   for (int i = 0; i < adcChannels; i++) {
     /* approximate first guess, compensate for 200 ohm resistor */
     v[i] = 1.0 - (( max((1.0 - vAdc[i]), 0.01)  * 1220.0) / 1020.0);
     vOrig[i] = v[i];
-    rOrigInv[i] = 1.0 / r[i];
+    //rOrigInv[i] = 1.0 / r[i];
   }
 
   if (verbose) {
@@ -734,7 +734,7 @@ struct Window {
   bool highlight;
 };
 
-#define numWindows 11
+#define numWindows 12
 
 enum windowIndex {
   menuText1 = 0,
@@ -746,8 +746,9 @@ enum windowIndex {
   fwdText,
   cancelText,
   okText,
+  statusBar1,
   visualizerWindow,
-  statusBar
+  statusBar2
 };
 
 
@@ -782,6 +783,7 @@ void renderScreen() {
     Rectangle r = windows[i].extent;
     if (!windows[i].enabled) {
       tft.fillRect(r.p1.x+1, r.p1.y+1, (r.p2.x-r.p1.x)-2, (r.p2.y-r.p1.y)-2, ILI9341_BLACK);
+      windows[i].redraw = false;
       continue;
     }
 
@@ -828,13 +830,15 @@ void screenSetup() {
     windows[i].extent = Rectangle (0, i*menuItemHeight, menuWidth, (i+1)*menuItemHeight);
   }
 
-  windows[5].extent  = Rectangle (menuWidth, 0, (menuWidth+navButtonWidth), menuItemHeight);
-  windows[6].extent  = Rectangle (menuWidth + navButtonWidth, 0, width, menuItemHeight);
-  windows[7].extent  = Rectangle (menuWidth, menuItemHeight, (menuWidth+navButtonWidth), menuItemHeight*2);
-  windows[8].extent  = Rectangle (menuWidth + navButtonWidth, menuItemHeight, width, menuItemHeight*2);
-  windows[statusBar].extent  = Rectangle (menuWidth, height-statusHeight, width, height);
-  windows[statusBar].enabled = true;
-  windows[visualizerWindow].extent = Rectangle (menuWidth, menuItemHeight*2, width, height-statusHeight);
+  windows[backText].extent  = Rectangle (menuWidth, 0, menuWidth + navButtonWidth, menuItemHeight);
+  windows[fwdText].extent  = Rectangle (menuWidth + navButtonWidth, 0, width, menuItemHeight);
+  windows[cancelText].extent  = Rectangle (menuWidth, menuItemHeight, menuWidth + navButtonWidth, menuItemHeight * 2);
+  windows[okText].extent  = Rectangle (menuWidth + navButtonWidth, menuItemHeight, width, menuItemHeight * 2);
+
+  windows[statusBar1].extent = Rectangle (menuWidth, menuItemHeight * 2, width, menuItemHeight * 2 + statusHeight);
+  windows[statusBar2].extent  = Rectangle (menuWidth, height-statusHeight, width, height);
+
+  windows[visualizerWindow].extent = Rectangle (menuWidth, menuItemHeight * 2 + statusHeight, width, height - statusHeight);
   windows[visualizerWindow].bgcolor = ILI9341_BLACK;
 
   windows[backText].text = "back";
@@ -881,6 +885,10 @@ enum menuItemType {
   empty
 };
 
+
+/* menu item that's selected for editing */
+struct MenuItem* editItem = nullptr;
+
 struct MenuItem {
   MenuItem(String text, menuItemType type,
           struct MenuItem* m1 = nullptr,
@@ -908,7 +916,12 @@ struct MenuItem {
       }
     }
   }
+  MenuItem(String text, menuItemType type, struct MenuItem *items, uint16_t numItems) : text{text}, type{type}, childrenExtended{items}, numChildren{numItems} {
+    /* populate children[] from childrenExtended[] */
+    menuScroll(0);
+  }
   MenuItem(String text, void (*select)(void *data), void *data = nullptr) : text{text}, type{action}, select{select}, data{data} {}
+  MenuItem(String text, enum menuItemType type, void *data, uint32_t *minValue, uint32_t *maxValue) : text{text}, type{type}, data{data}, minValue{minValue}, maxValue{maxValue} {}
   MenuItem(String text, enum menuItemType type, void *data, uint32_t defaultValue = 0, void (*select)(void *data) = nullptr) : text{text}, type{type}, select{select}, data{data}, defaultValue{defaultValue} {
     if (type == toggle && data != nullptr) {
       highlight = *((bool*)data);
@@ -931,6 +944,9 @@ struct MenuItem {
       case selection:
         highlight = *(uint32_t*)data == defaultValue;
         break;
+      case value:
+        highlight = editItem == this;
+        break;
       default:
         highlight = false;
         break;
@@ -939,13 +955,44 @@ struct MenuItem {
     return highlight;
   }
 
+  void menuScroll(int offset) {
+    if (type != submenu || childrenExtended == nullptr) {
+      return;
+    }
+
+    if (offset > 0) {
+      if (scrollOffset + offset + 5 >= numChildren) {
+        return;
+      }
+    } else {
+      if (scrollOffset + offset < 0) {
+        return;
+      }
+    }
+
+    scrollOffset += offset;
+
+    for (int i = 0; i < 5; i++) {
+      if (i + scrollOffset < numChildren) {
+        children[i] = &childrenExtended[i + scrollOffset];
+      } else {
+        children[i] = nullptr;
+      }
+      windows[i].redraw = true;
+    }
+  }
+
   String text;
   enum menuItemType type;
   void (*select)(void* data) = nullptr;
   void *data = nullptr;
   uint32_t defaultValue = 0; /* for "selection" type, the value to set data to */
-  uint8_t numChildren = 0;
+  uint32_t *minValue = nullptr;
+  uint32_t *maxValue = nullptr;
+  struct MenuItem* childrenExtended = nullptr;
+  uint16_t numChildren = 0;
   struct MenuItem* children[5];
+  int scrollOffset = 0;
   bool highlight = false;
 };
 
@@ -953,7 +1000,8 @@ struct MenuItem emptyMenuItem = MenuItem("", empty);
 
 struct MenuItem* menu[5] = {&emptyMenuItem, &emptyMenuItem, &emptyMenuItem, &emptyMenuItem, &emptyMenuItem};
 
-struct MenuItem* menuStack[10];
+#define menuStackSize 10
+struct MenuItem* menuStack[menuStackSize];
 uint16_t menuStackPos = 0;
 
 void statusTextUpdate();
@@ -961,7 +1009,7 @@ void statusTextUpdate();
 void menuSelect(struct MenuItem *item, uint16_t button) {
   if (item->type == submenu) {
     for (int i=0; i < 5; i++) {
-      if (i < item->numChildren) {
+      if (i + item->scrollOffset < item->numChildren) {
         windows[i].bgcolor = ILI9341_DARKGREY;
         windows[i].text = item->children[i]->text;
         windows[i].enabled = true;
@@ -979,14 +1027,16 @@ void menuSelect(struct MenuItem *item, uint16_t button) {
 
     menuStack[menuStackPos] = item;
     menuStackPos++;
+
+    if (menuStackPos >= menuStackSize) {
+      menuStackPos = menuStackSize - 1;
+      Serial.println("menu stack overflow");
+    }
   }
 
   if (item->type == toggle){
     if (item->data != nullptr) {
       *((bool*)(item->data)) = !*(bool*)(item->data);
-      Serial.println("toggled value is " + String(*(bool*)(item->data)));
-    } else {
-      Serial.println("no value pointer to toggle");
     }
   }
 
@@ -996,13 +1046,25 @@ void menuSelect(struct MenuItem *item, uint16_t button) {
     }
   }
 
+  if (item->type == value) {
+    windows[visualizerWindow].text = String(*(uint32_t *)(item->data));
+    windows[visualizerWindow].enabled = true;
+    editItem = item;
+    windows[visualizerWindow].redraw = true;
+  } else {
+    editItem = nullptr;
+    windows[visualizerWindow].text = "";
+    windows[visualizerWindow].redraw = true;
+    windows[visualizerWindow].enabled = false;
+  }
+
   if (item->select != nullptr) {
     item->select(item->data);
   }
 
   if (menuStackPos > 0) {
     struct MenuItem *parent = menuStack[menuStackPos-1];
-    for (int i = 0; i < parent->numChildren; i++) {
+    for (int i = 0; i + parent->scrollOffset < parent->numChildren && i < 5; i++) {
       auto child = parent->children[i];
       bool prevHighlight = child->highlight;
 
@@ -1015,7 +1077,8 @@ void menuSelect(struct MenuItem *item, uint16_t button) {
 
   if (item->type != submenu) {
     statusTextUpdate();
-    windows[statusBar].redraw = true;
+    windows[statusBar1].redraw = true;
+    windows[statusBar2].redraw = true;
   }
 }
 
@@ -1177,7 +1240,7 @@ struct MpeChannelState{
   double lastBendInterval;
   uint32_t pitchBendAge;
   uint16_t owner;
-  int lastProgramChangeSent;
+  uint8_t lastProgramChangeSent;
   uint32_t volumeAge;
   uint8_t lastBankMsb;
   uint8_t lastBankLsb;
@@ -1186,7 +1249,7 @@ struct MpeChannelState{
 };
 
 struct MpeChannelState mpeState[16];
-uint8_t programChange = 0;
+uint32_t programChange = 0;
 
 int noteOnCount = 0;
 int noteOffCount = 0;
@@ -1274,12 +1337,12 @@ enum midiType {
 };
 
 double transpose = 1.0;
-int mpeBankLsbMin = 0;
-int mpeBankLsbMax = 0;
-int mpeBankMsbMin = 0;
-int mpeBankMsbMax = 0;
-int mpeBankMsb = 0;
-int mpeBankLsb = 0;
+uint32_t mpeBankLsbMin = 0;
+uint32_t mpeBankLsbMax = 0;
+uint32_t mpeBankMsbMin = 0;
+uint32_t mpeBankMsbMax = 0;
+uint32_t mpeBankMsb = 0;
+uint32_t mpeBankLsb = 0;
 enum midiType midiType = multitimbral;
 int pressureBackoff = 5000;
 
@@ -1387,11 +1450,13 @@ struct MpeChannelState *beginMpeNote(double pitch, int owner, double velocity, d
 
       if (state->lastBankMsb != mpeBankMsb) {
         midiControlChange(0, mpeBankMsb, state->channel+1);
+        midiProgramChange(programChange, state->channel+1);
         state->lastBankMsb = mpeBankMsb;
       }
 
       if (state->lastBankLsb != mpeBankLsb) {
         midiControlChange(32, mpeBankLsb, state->channel+1);
+        midiProgramChange(programChange, state->channel+1);
         state->lastBankLsb = mpeBankLsb;
       }
 
@@ -1402,12 +1467,12 @@ struct MpeChannelState *beginMpeNote(double pitch, int owner, double velocity, d
         Serial.println(state->channel);
 
         // set pitch bend range
-        midiControlChange(100, 0, state->channel+1);
-        midiControlChange(101, 0, state->channel+1);
-        midiControlChange(6, (int)pbRange, state->channel+1);
-        midiControlChange(38, 0, state->channel+1);
-        midiControlChange(101, 127, state->channel+1);
-        midiControlChange(100, 127, state->channel+1);
+        //midiControlChange(100, 0, state->channel+1);
+        //midiControlChange(101, 0, state->channel+1);
+        //midiControlChange(6, (int)pbRange, state->channel+1);
+        //midiControlChange(38, 0, state->channel+1);
+        //midiControlChange(101, 127, state->channel+1);
+        //midiControlChange(100, 127, state->channel+1);
 
         /* turn down resonance */
         // midiControlChange(71, 0, state->channel+1);
@@ -1520,6 +1585,12 @@ void doMpeMasterPitchbend(double pbUp, double pbDown, uint32_t deltaUsecs) {
   masterPbAge = 0;
 }
 
+#define useUsbFlag        (1 << 0)
+#define useDinFlag        (1 << 1)
+#define noVelocityFlag    (1 << 2)
+#define noPressureFlag    (1 << 3)
+#define skipChannel10Flag (1 << 4)
+
 struct MpeSettings {
   enum midiType midiType;
   const char* name;
@@ -1533,14 +1604,15 @@ struct MpeSettings {
   uint8_t bankLsbMax;
   bool useDinMidi;
   bool skipChannel10;
+  uint32_t flags;
 };
 
-struct MpeSettings mpeSettingsDefault = {multitimbral, "default",    16,  2.0,  5000, 7,  0,  0,  0,  0,   true, false};
-struct MpeSettings mpeSettingsXV2020  = {multitimbral, "xv-2020",    16,  2.0, 20000, 7,  87, 87, 64, 255, true,  true};
-struct MpeSettings mpeSettingsFB01    = {multitimbral, "fb-01",       8,  2.0,  5000, 7,  0,  0,  0,  0,   true, false};
-struct MpeSettings mpeSettingsKSP     = {multitimbral, "keystep pro", 4, 12.0,  5000, 1,  0,  0,  0,  0,   true, false};
-struct MpeSettings mpeSettingsTrinity = {multitimbral, "trinity",    16,  2.0,  5000, 74, 0,  0,  0,  3,   true, false};
-struct MpeSettings mpeSettingsSurgeXT = {mpe,          "surge-xt",   16, 48.0,  5000, 74, 0,  0,  0,  0,  false, false};
+struct MpeSettings mpeSettingsDefault = {multitimbral, "default midi", 16,  2.0,  5000, 7,  0,  0,  0,  0,   true, false, useUsbFlag};
+struct MpeSettings mpeSettingsXV2020  = {multitimbral, "xv-2020",      16,  2.0, 20000, 7,  87, 87, 64, 255, true,  true, useDinFlag | skipChannel10Flag};
+struct MpeSettings mpeSettingsFB01    = {multitimbral, "fb-01",         8,  2.0,  5000, 7,  0,  0,  0,  0,   true, false, useDinFlag};
+struct MpeSettings mpeSettingsKSP     = {multitimbral, "keystep pro",   4, 12.0,  5000, 1,  0,  0,  0,  0,   true, false, useDinFlag};
+struct MpeSettings mpeSettingsTrinity = {multitimbral, "trinity",      16,  2.0,  5000, 74, 0,  0,  0,  3,   true, false, useDinFlag};
+struct MpeSettings mpeSettingsSurgeXT = {mpe,          "surge-xt",     16, 48.0,  5000, 74, 0,  0,  0,  0,  false, false, useUsbFlag};
 
 void sendMpeZones(){
   midiReadyWait();
@@ -1548,15 +1620,15 @@ void sendMpeZones(){
   midiReadyWait();
   midiControlChange(65, 00, 1);
   midiReadyWait();
-  midiControlChange(06, 15, 1);
+  midiControlChange(06, mpeChannels, 1);
 }
 
 struct MpeSettings *currentMpeSettings = nullptr;
 struct MpeSettings *mpeSettings = nullptr;
 
 void applyMpeSettings(struct MpeSettings *settings) {
-  useDinMidi = settings->useDinMidi;
-  useUsbMidi = !settings->useDinMidi;
+  useDinMidi = (settings->flags & useDinFlag) > 0;
+  useUsbMidi = (settings->flags & useUsbFlag) > 0;
   midiType = settings->midiType;
   pressureBackoff = settings->pressureBackoff;
   pbRange = settings->pbRange;
@@ -1567,7 +1639,7 @@ void applyMpeSettings(struct MpeSettings *settings) {
   mpeBankLsbMax = settings->bankLsbMax;
   mpeBankMsb = mpeBankMsbMin;
   mpeBankLsb = mpeBankLsbMin;
-  skipChannel10 = settings->skipChannel10;
+  skipChannel10 = (settings->flags & skipChannel10Flag) > 0;
 
   switch (settings->midiType) {
     case multitimbral:
@@ -1577,7 +1649,6 @@ void applyMpeSettings(struct MpeSettings *settings) {
     case mpe:
       firstMpeChannel = 1;
       mpeChannels = 15;
-
       sendMpeZones();
       break;
     default:
@@ -1646,8 +1717,6 @@ void mpeSetup() {
   Serial.println("mpeSetup midiBufferSize " + String(midiBufferSize));
 
   applyMpeSettings(&mpeSettingsSurgeXT);
-  //applyMpeSettings(&mpeSettingsKSP);
-  //applyMpeSettings(&mpeSettingsXV2020);
 }
 
 /* 
@@ -1669,6 +1738,36 @@ void mpeUpdate(uint32_t deltaUsecs) {
     applyMpeSettings(mpeSettings);
     Serial.println("done");
     currentMpeSettings = mpeSettings;
+  }
+
+  if (midiType == mpe) {
+    struct MpeChannelState *state = &mpeState[0];
+
+    if (state->lastBankMsb != mpeBankMsb) {
+      midiControlChange(0, mpeBankMsb, 1);
+      midiProgramChange(programChange, 1);
+      state->lastBankLsb = mpeBankMsb;
+    }
+
+    if (state->lastBankLsb != mpeBankLsb) {
+      midiControlChange(32, mpeBankLsb, 1);
+      midiProgramChange(programChange, 1);
+      state->lastBankLsb = mpeBankLsb;
+    }
+
+    if (state->lastProgramChangeSent != programChange) {
+      midiProgramChange(programChange, 1);
+      state->lastProgramChangeSent = programChange;
+      Serial.print("sent program change on channel 1");
+
+      // set pitch bend range
+      //midiControlChange(100, 0, state->channel+1);
+      //midiControlChange(101, 0, state->channel+1);
+      //midiControlChange(6, (int)pbRange, state->channel+1);
+      //midiControlChange(38, 0, state->channel+1);
+      //midiControlChange(101, 127, state->channel+1);
+      //midiControlChange(100, 127, state->channel+1);
+    }
   }
 }
 
@@ -2037,14 +2136,14 @@ void menuButtonUpdate(struct Control* control, uint32_t deltaUsecs) {
     if (!control->held) {
       menuPress(button, pressure, deltaUsecs);
       control->held = true;
-      Serial.println("menu button " + String(button) + " pressed " + String(midiBufferSize));
+      Serial.println("menu button " + String(button) + " pressed");
     }
   } else {
     if (control->held) {
-      Serial.println("menu button " + String(button) + " released " + String(midiBufferSize));
+      Serial.println("menu button " + String(button) + " released");
       menuRelease(button, pressure, deltaUsecs);
       control->held = false;
-      Serial.println("menu Release called" + String(midiBufferSize));
+      Serial.println("menu Release called");
     }
   }
 }
@@ -2080,6 +2179,46 @@ void decProgramChangeUpdate(struct Control* control, uint32_t deltaUsecs) {
     control->delay = 100000;
     Serial.print("programChange ");
     Serial.println(programChange);
+  }
+}
+
+void scrollUpUpdate(struct Control* control, uint32_t deltaUsecs) {
+  check_debounce;
+
+  if (menuStackPos == 0) {
+    return;
+  }
+
+  struct MenuItem* menu = menuStack[menuStackPos];
+  if (menu->childrenExtended == nullptr) {
+    return;
+  }
+
+  int value = values[control->bit][control->channel];
+  int pressure = (4095-value) - control->thresholdPressure;
+  if (pressure > 0) {
+    menu->menuScroll(-1);
+    control->delay = 100000;
+  }
+}
+
+void scrollDownUpdate(struct Control* control, uint32_t deltaUsecs) {
+  check_debounce;
+
+  if (menuStackPos == 0) {
+    return;
+  }
+
+  struct MenuItem* menu = menuStack[menuStackPos];
+  if (menu->childrenExtended == nullptr) {
+    return;
+  }
+
+  int value = values[control->bit][control->channel];
+  int pressure = (4095-value) - control->thresholdPressure;
+  if (pressure > 0) {
+    menu->menuScroll(1);
+    control->delay = 100000;
   }
 }
 
@@ -2194,8 +2333,8 @@ void statusTextUpdate() {
     output = output + " din5";
   }
 
-  windows[statusBar].text = " " + name + String(octave+4) + " " + type + output;
-  windows[statusBar].redraw = true;
+  windows[statusBar2].text = " " + name + String(octave+4) + " " + type + output;
+  windows[statusBar2].redraw = true;
 }
 
 void transposeUpUpdate(struct Control* control, uint32_t deltaUsecs) {
@@ -2295,6 +2434,48 @@ void bankLsbDownUpdate(struct Control* control, uint32_t deltaUsecs) {
   }
 }
 
+void editValueIncrementUpdate(struct Control* control, uint32_t deltaUsecs) {
+  if (editItem == nullptr) {
+    return;
+  }
+
+  check_debounce;
+
+  int value = values[control->bit][control->channel];
+  int pressure = (4095-value) - control->thresholdPressure;
+  if (pressure > 0) {
+    auto val = *(uint32_t*)(editItem->data);
+    if (editItem->maxValue == nullptr || val < *editItem->maxValue) {
+      val++;
+      windows[visualizerWindow].text = String(val);
+      *(uint32_t*)(editItem->data) = val;
+      windows[visualizerWindow].redraw = true;
+      control->delay = 1000000 / pressure;
+    }
+  }
+}
+
+void editValueDecrementUpdate(struct Control* control, uint32_t deltaUsecs) {
+  if (editItem == nullptr) {
+    return;
+  }
+
+  check_debounce;
+
+  int value = values[control->bit][control->channel];
+  int pressure = (4095-value) - control->thresholdPressure;
+  if (pressure > 0) {
+    auto val = *(uint32_t*)(editItem->data);
+    if (editItem->minValue == nullptr || val > *editItem->minValue) {
+      val--;
+      windows[visualizerWindow].text = String(val);
+      *(uint32_t*)(editItem->data) = val;
+      windows[visualizerWindow].redraw = true;
+      control->delay = 1000000 / pressure;
+    }
+  }
+}
+
 void mpeZoneUpdate(struct Control* control, uint32_t deltaUsecs) {
   check_debounce;
 
@@ -2306,6 +2487,7 @@ void mpeZoneUpdate(struct Control* control, uint32_t deltaUsecs) {
     control->delay = 100000;
   }
 }
+
 struct Control controls[maxShiftRegisterBits][adcChannels];
 
 #define CONTROL(type, bit, channel, name) (controls[bit][channel] = Control(type, bit, channel, name, thresholdPressure, maxPressure))
@@ -2386,13 +2568,15 @@ void controlSetupController(uint16_t thresholdPressure, uint16_t maxPressure) {
   //controls[6][1].update = allNotesOffUpdate;
   //controls[4][1].update = allNotesOffSlowUpdate;
 
-  controls[5][0].update = incProgramChangeUpdate;
-  controls[1][1].update = decProgramChangeUpdate;
+  controls[5][0].update = scrollUpUpdate;  // up
+  controls[1][1].update = scrollDownUpdate;  // down
 
   controls[1][0].update = menuButtonUpdate;
   controls[1][0].data = backText;
   controls[4][0].update = bankLsbUpUpdate;
   //controls[5][1].update = mpeZoneUpdate;
+  controls[6][0].update = editValueIncrementUpdate; // right
+  controls[7][0].update = editValueDecrementUpdate; // left
 }
 
 
@@ -2566,10 +2750,24 @@ struct MenuItem mpeHandshakeMenuItem("mpe init", mpeHandshakeAction);
 struct MenuItem doVelocityMenuItem("velocity", toggle, &doMpeDynamicVelocity);
 struct MenuItem doPressureMenuItem("pressure", toggle, &doMpeDynamicPressure);
 
+struct MenuItem mpeBankLsbMenuItem("bank LSB", value, &mpeBankLsb, &mpeBankLsbMin, &mpeBankMsbMax);
+struct MenuItem mpeBankMsbMenuItem("bank MSB", value, &mpeBankMsb, &mpeBankLsbMin, &mpeBankMsbMax);
+
+uint32_t zero = 0;
+uint32_t maxMidiValue = 127;
+struct MenuItem mpeProgramChangeMenuItem("patch", value, &programChange, &zero, &maxMidiValue);
 
 struct MenuItem surgeXtPresetMenuItem("Surge XT", selection, &mpeSettings, (uint32_t)&mpeSettingsSurgeXT);
 struct MenuItem kspPresetMenuItem("Keystep Pro", selection, &mpeSettings, (uint32_t)&mpeSettingsKSP);
 struct MenuItem xv2020PresetMenuItem("XV-2020", selection, &mpeSettings, (uint32_t)&mpeSettingsXV2020);
+
+
+struct MenuItem arturiaMenu("Arturia", submenu, &kspPresetMenuItem);
+struct MenuItem korgMenu("Korg", submenu);
+struct MenuItem moogMenu("Moog", submenu);
+struct MenuItem rolandMenu("Roland", submenu);
+struct MenuItem yamahaMenu("Yamaha", submenu);
+struct MenuItem* brandsMenu[] = {&arturiaMenu, &korgMenu, &moogMenu, &rolandMenu, &yamahaMenu};
 
 struct MenuItem outputPresetsMenu("dev presets", submenu, &surgeXtPresetMenuItem, &kspPresetMenuItem, &xv2020PresetMenuItem);
 struct MenuItem outputMenu("output", submenu, &useUsbMenuItem, &useDinMenuItem, &mpeHandshakeMenuItem, &outputPresetsMenu);
@@ -2577,13 +2775,13 @@ struct MenuItem controlsMenu("controls", submenu, &doVelocityMenuItem, &doPressu
 
 struct MenuItem screenBrightnessMenu("brightness", submenu, &screen10MenuItem, &screen25MenuItem, &screen50MenuItem, &screen75MenuItem, &screen100MenuItem);
 struct MenuItem interfaceMenu("interface", submenu, &screenBrightnessMenu);
+struct MenuItem patchesMenu("patches", submenu, &mpeBankLsbMenuItem,  &mpeBankMsbMenuItem, &mpeProgramChangeMenuItem);
 
-
-struct MenuItem configMenu("setup", submenu, &outputMenu, &controlsMenu, &interfaceMenu);
+struct MenuItem configMenu("settings", submenu, &outputMenu, &controlsMenu, &interfaceMenu);
 
 //struct MenuItem arpMenu("arpeggiator", submenu);
 
-struct MenuItem rootMenu("", submenu, &configMenu, &allNotesOffSlowMenuItem);
+struct MenuItem rootMenu("", submenu, &configMenu, &patchesMenu, &allNotesOffSlowMenuItem);
 
 void menuSetup() {
   menuSelect(&rootMenu, 0);
