@@ -10,3 +10,5 @@ The design currently uses a Teensy 4.0 or 4.1 microcontroller.  The recommended 
 The project is in an early state and not yet available generally yet, but my plan is for the firmware source code as well as the schematic to be open source.  The PCB designs will probably remain proprietary.
 
 Building alternative control surfaces should be relatively straightforward with simple parts.  The control surface bus is meant to be extensible, so you can daisy chain multiple control surfaces off of one controller module if you want (at some cost in the form of electrical noise and a slower scan rate).
+
+This controller project improves upon an earlier prototype described in great detail here: http://jsnow.bootlegether.net/jik/keyboard.html
