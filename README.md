@@ -1,7 +1,9 @@
 # microtonal-controller
 Firmware for microtonal keyboard controller
 
-This is the firmware for the JI7L4 just-intonation keyboard controller and any other projects based on the same architecture.
+This is the firmware for the Seven Limit just-intonation keyboard controller and any other projects based on the same architecture.
+
+![Seven Limit](doc/seven_limit.jpeg?raw=true "Seven Limit controller")
 
 The design currently uses a Teensy 4.0 or 4.1 microcontroller.  The recommended way to edit the source code and load new firmware is through the Arduino IDE with Teensyduino extensions.  (I'm using 2.1.0 of the Arduino IDE.)
 
