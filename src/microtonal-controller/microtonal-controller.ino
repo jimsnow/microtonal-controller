@@ -1917,7 +1917,7 @@ struct MpeSettings mpeSettingsTrinity = {multitimbral, 16,  2,  1000, 7, 0,  0, 
 struct MpeSettings mpeSettingsSP300   = {multitimbral, 16,  2,  1000, 7,  0,  0,   0,  0,  0,   0,  useDinFlag};
 struct MpeSettings mpeSettingsSurgeXT = {mpe,          16, 48,  1000, 74, 0,  0,   0,  0,  0,   0,  useUsbFlag};
 struct MpeSettings mpeSettingsProteus = {multitimbral, 16,  2,  1000, 7,  0,  4,   4,  0,  7,   0,  useDinFlag | gmFlag | forcePbRangeFlag};
-struct MpeSettings mpeSettingsMox8    = {multitimbral, 16,  2,  1000, 7,  63, 63,  63, 0,  7,   0,  useDinFlag | gmFlag | noPressureFlag | forcePbRangeFlag | ccResetFlag};
+struct MpeSettings mpeSettingsMox8    = {multitimbral, 16,  2,  1400, 7,  63, 63,  63, 0,  7,   0,  useDinFlag | gmFlag | forcePbRangeFlag | ccResetFlag};
 struct MpeSettings mpeSettingsPhatty  = {monovoice,    1,   2,  1000, 19, 0,  0,   0,  0,  0,   0,  useDinFlag | forcePbRangeFlag};
 
 void sendMpeZones() {
@@ -2044,16 +2044,17 @@ void mpeCCReset(){
     midiControlChange(   7,   0, channel+1); // volume
     midiControlChange( 0xa,  64, channel+1); // pan
     midiReadyWait();
-    midiControlChange(0x1f,   0, channel+1); // eg sustain level
+    midiControlChange(0x1f,  64, channel+1); // eg sustain level
     midiControlChange(0x40,   0, channel+1); // sustain pedal
     midiControlChange(0x41,   0, channel+1); // portamento pedal
     midiControlChange(0x42,   0, channel+1); // sostenuto pedal
     midiReadyWait();
     midiControlChange(0x47,   0, channel+1); // resonance
-    midiControlChange(0x48,  32, channel+1); // eg release
-    midiControlChange(0x49,  32, channel+1); // eg attack
+    midiControlChange(0x48,  64, channel+1); // eg release
+    midiControlChange(0x49,  64, channel+1); // eg attack
+    midiControlChange(0x4a,  64, channel+1); // filter cutoff
     midiReadyWait();
-    midiControlChange(0x5b,  23, channel+1); // reverb send
+    midiControlChange(0x5b,  32, channel+1); // reverb send
     midiControlChange(0x5d,   0, channel+1); // chorus send
   }
 }
