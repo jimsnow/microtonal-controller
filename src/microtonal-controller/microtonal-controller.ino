@@ -1,3 +1,4 @@
+/**@file microtonal-controller.ino */
 /*
 Copyright 2023 Jim Snow
 
@@ -106,7 +107,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define canTxPin 22
 #define canRxPin 23
 
-#define screenCSPin 255
+#define screenCSPin 36
 #endif
 
 
@@ -366,8 +367,6 @@ void calibrateADCs(bool verbose, float cal[adcChannels][adcChannels]) {
       float jv = (jadc * 1220.0f) / 1020.0f;
       float rijTotal = (2440.0f / (1.0f - (iv -jv))) - 2440.0f;
 
-
-      
       //int k, l;
       //getKl(i, j, k, l);
 
@@ -830,6 +829,7 @@ struct Window {
   bool enabled;
   bool redraw;
   bool highlight;
+  uint32_t textUsecs;
 };
 
 #define numWindows 12
@@ -873,7 +873,7 @@ uint32_t brightnessSet = 255;
 bool moreUp = false;
 bool moreDown = false;
 
-void renderScreen() {
+void renderScreen(uint32_t deltaUsecs) {
   for (int i=0; i<numWindows; i++) {
     if (!windows[i].redraw) {
       continue;
@@ -908,13 +908,13 @@ void renderScreen() {
 
   if (moreUp) {
     tft.setTextColor(windows[menuText1].highlight ? windows[menuText1].bgcolor : windows[menuText1].fgcolor);
-    tft.setCursor(80, 4);
+    tft.setCursor(52, 0);
     tft.println("...");
   }
 
   if (moreDown) {
     tft.setTextColor(windows[menuText5].highlight ? windows[menuText5].bgcolor : windows[menuText5].fgcolor);
-    tft.setCursor(80, 216);
+    tft.setCursor(52, 218);
     tft.println("...");
   }
 
@@ -935,6 +935,7 @@ void screenSetup() {
     windows[i].enabled = true;
     windows[i].redraw = true;
     windows[i].highlight = false;
+    windows[i].textUsecs = 0;
   }
 
 
@@ -982,7 +983,7 @@ void screenSetup() {
   tft.fillScreen(ILI9341_BLACK);
 
   Serial.println("4");
-  renderScreen();
+  renderScreen(0);
 
   uint8_t x = tft.readcommand8(ILI9341_RDMODE);
   Serial.print("Display Power Mode: 0x"); Serial.println(x, HEX);
@@ -1186,7 +1187,7 @@ void menuSelect(struct MenuItem *item, uint16_t button) {
       if (i + item->scrollOffset < item->numChildren) {
         windows[i].bgcolor = ILI9341_DARKGREY;
         windows[i].text = item->children[i]->text;
-        windows[i].enabled = true;
+        windows[i].enabled = item->children[i]->type != empty;
         menu[i] = item->children[i];
         Serial.println("displaying menu item " + String(i) + " " + windows[i].text);
       } else {
@@ -1328,6 +1329,19 @@ void menuBack() {
   }
 }
 
+void menuUpdate(uint32_t deltaUsecs) {
+  struct Window* status1 = &windows[statusBar1];
+  if (status1->textUsecs > 0) {
+    if (deltaUsecs >= status1->textUsecs) {
+      status1->textUsecs = 0;
+      status1->text = "";
+      status1->redraw = true;
+    } else {
+      status1->textUsecs -= deltaUsecs;
+    }
+  }
+}
+
 /* CAN BUS */
 
 FlexCAN_T4<CAN1, RX_SIZE_256, TX_SIZE_16> can;
@@ -1365,13 +1379,36 @@ void canUpdate() {
 bool useUsbMidi = true;
 bool useDinMidi = false;
 
-//USBMIDI_CREATE_DEFAULT_INSTANCE();
-MIDI_CREATE_INSTANCE(HardwareSerial, Serial5, dinMidi);
+struct MidiLocalSettings : public MIDI_NAMESPACE::DefaultSettings {
+  static const bool UseRunningStatus = true;  /* avoid re-sending status byte when it hasn't changed */
+};
+
+MIDI_CREATE_CUSTOM_INSTANCE(HardwareSerial, Serial5, dinMidi, MidiLocalSettings);
+
+//MIDI_CREATE_INSTANCE(HardwareSerial, Serial5, dinMidi);
 
 uint64_t midiMsgsSent = 0;
 uint64_t midiMsgsReceived = 0;
 
-#define doMidi(func, ...) {midiMsgsSent++; if (useUsbMidi) {usbMIDI.func(__VA_ARGS__);} if (useDinMidi) {dinMidi.func(__VA_ARGS__);}}
+#define doMidi(func, ...) { \
+  midiMsgsSent++; \
+  if (useUsbMidi) { \
+    usbMIDI.func(__VA_ARGS__); \
+  } \
+  if (useDinMidi) { \
+    dinMidi.func(__VA_ARGS__); \
+  } \
+}
+
+#define doMidiDivergent(usbFunc, serialFunc, ...) { \
+  midiMsgsSent++; \
+  if (useUsbMidi) { \
+    usbMIDI.usbFunc(__VA_ARGS__); \
+  } \
+  if (useDinMidi) { \
+    dinMidi.serialFunc(__VA_ARGS__); \
+  } \
+}
 
 void midiNoteOn(uint8_t note, uint8_t velocity, uint8_t channel) {
   doMidi(sendNoteOn, note, velocity, channel);
@@ -1390,14 +1427,16 @@ void midiAfterTouch(uint8_t volume, uint8_t channel) {
 }
 
 void midiPolyAfterTouch(uint8_t note, uint8_t pressure, uint8_t channel) {
-  //doMidi(sendAfterTouch, note, pressure, channel);
-
   // sendPolyPressure provokes a deprecation warning,
-  // but the polyAT variant of sendAfterTouch doesn't seem to work
-  doMidi(sendPolyPressure, note, pressure, channel);
+  // but sendAfterTouch in the usb midi api doesn't have
+  // a polyphonic variant
+  doMidiDivergent(sendAfterTouchPoly, sendAfterTouch, note, pressure, channel);
 }
 
 void midiControlChange(uint8_t cc, uint8_t value, uint8_t channel) {
+  if (cc > 127) {
+    return;
+  }
   doMidi(sendControlChange, cc, value, channel);
 }
 
@@ -1477,7 +1516,10 @@ void midiReadyWait() {
   };
 }
 
+/* MPE */
+
 int mpeChannels = 16;
+int mpeChannelsSet = mpeChannels;
 int firstMpeChannel = 0;
 
 #define noOne 0xffff
@@ -1503,6 +1545,20 @@ struct MpeChannelState{
   void (*stealCallback)(uint16_t owner);
 };
 
+/* Store state of "global" CCs that should affect all channels the same. */
+struct CCState {
+  CCState() {};
+  uint16_t dirty = 0;       /* bitmask of channels requiring CC updates */
+  uint8_t next = 127;       /* keep track of next in-use CC so we can iterate faster */
+  uint8_t value = 128;      /* curent value of CC, or 128 if either unused or not set */
+  bool noMulticast = 0;     /* do not send on all channels, as we control those individually elsewhere */
+  bool forceMulticast = 0;  /* multicast even on MPE */
+  uint8_t center = 0;       /* "neutral" value */
+};
+
+/* most of these will go unused, but that's okay */
+struct CCState ccs[128];
+
 struct MpeChannelState mpeState[16];
 uint32_t programChange = 0;
 
@@ -1512,6 +1568,33 @@ bool doLsb = false;
 
 int noteOnCount = 0;
 int noteOffCount = 0;
+
+void mpeMulticastCC(uint8_t cc, float value) {
+  int v = (int)(value * 127.0f);
+
+  Serial.println("mpeMulticastCC " + String(cc) + " " + String(v));
+
+  if (v > 127) {
+    v = 127;
+  } else if (v < 0) {
+    v = 0;
+  }
+
+  if (v == ccs[cc].value) {
+    return;
+  }
+
+  ccs[cc].value = v;
+  ccs[cc].dirty = 0xffff;
+
+  for (int i = cc-1; i >= 0; i--) {
+    if (ccs[i].next <= cc) {
+      break;
+    }
+
+    ccs[i].next = cc;
+  }
+}
 
 uint32_t mpeIdleScore(int channel) {
   struct MpeChannelState *state = &mpeState[channel];
@@ -1541,6 +1624,7 @@ struct MpeChannelState *getMpeChannel() {
     if (channel+1 == 10 && skipChannel10) {
       continue;
     }
+
     uint32_t score = mpeIdleScore(channel);
     if (score > bestScore) {
       bestScore = score;
@@ -1571,9 +1655,9 @@ struct MpeChannelState *getMpeChannel() {
 #define middleC 60 // midi note number for C4
 
 uint32_t pbRange = 2;  // could use float, but int is more compatible with MIDI pitch bend range configuration
-uint32_t pressureCC = 0;
+uint32_t pressureCC = 128;
 uint32_t pressureCCSet = pressureCC;
-uint8_t pressureMax = 127;
+uint32_t maxMpePressure = 127;
 
 /* seconds from full to none, or vice versa */
 double attack = 0.0;
@@ -1632,6 +1716,11 @@ bool forcePbRange = false;
 
 // 1/seconds to fall from full intensity
 float releaseRate = 2.0f;
+
+float pressureExponent = 0.8f;
+
+bool delayNoteOff = false;
+bool noteOnFirst = false;
 
 double pitchReferenceHz() {
   double c = 440.0 / (pow(pow(2, 1.0/12.0), 9));
@@ -1695,18 +1784,26 @@ void prepareChannel(struct MpeChannelState *state) {
   }
 }
 
+bool bendUpOnly = false;
+
 struct MpeChannelState *beginMpeNote(double pitch, int owner, double velocity, double pressure, void stealCallback(uint16_t)) {
   double shift = pitchToCents(pitch * transpose);
   //state->originalPitch = shift;
 
-  int semitones = shift / 100.0;
-  double cents = shift - (semitones * 100.0);
-  if (cents > 50.0) {
+  int semitones = shift / 100.0f;
+  float cents = shift - (semitones * 100.0f);
+  if (cents > 50.0f) {
     semitones++;
-    cents -= 100.0;
-  } else if (cents < -50.0) {
+    cents -= 100.0f;
+  } else if (cents < -50.0f) {
     semitones--;
-    cents += 100.0;
+    cents += 100.0f;
+  }
+
+  if (bendUpOnly && cents < 0.0f) {
+    semitones--;
+    cents += 100.0f;
+
   }
 
   int note = middleC + semitones;
@@ -1763,14 +1860,25 @@ struct MpeChannelState *beginMpeNote(double pitch, int owner, double velocity, d
     midiPitchBend(pb, state->channel+1);
     state->lastPitchBend = pb;
     state->volumeAge = 1000000;
+    state->volume = 0.0f; /* we'll reset this in continueMpeNote, but we need to zero it first */
 
-    //midiNoteOn(note, v, state->channel+1);
-    continueMpeNote(state, pressure, 0);
+    if (noteOnFirst) {
+      midiNoteOn(note, v, state->channel+1);
+      noteOnCount++;
+    }
 
-    midiNoteOn(note, v, state->channel+1);
-    noteOnCount++;
+    if (!continueMpeNote(state, pressure, 0)) {
+      state->playing = false;
+      state->owner = noOne;
+      return nullptr;
+    }
 
-    Serial.println("note-on channel" + String(state->channel+1) + " note " + String(note) + " cents " + String(cents) + " (" + String(centsToPitch(cents)) + ") pb " + String(pb));
+    if (!noteOnFirst) {
+      midiNoteOn(note, v, state->channel+1);
+      noteOnCount++;
+    }
+
+    Serial.println("note-on channel" + String(state->channel+1) + " note " + String(note) + " cents " + String(cents) + " (" + String(centsToPitch(cents)) + ") pb " + String(pb) + " pressure " + pressure);
   }
 
   state->age = 0;
@@ -1781,9 +1889,7 @@ struct MpeChannelState *beginMpeNote(double pitch, int owner, double velocity, d
 float mpePolyAfterTouchMin = 0.75f;
 float mpePolyAfterTouchMax = 1.25f;
 
-void continueMpeNote(struct MpeChannelState *state, double pressure, uint32_t deltaUsecs) {
-
-  /* rate limit pressure updates */
+bool continueMpeNote(struct MpeChannelState *state, double pressure, uint32_t deltaUsecs) {
   uint32_t concurrentNotes = noteOnCount - noteOffCount;
 
   float minPressure = state->volume - releaseRate * ((float)deltaUsecs/1000000.0f);
@@ -1797,14 +1903,15 @@ void continueMpeNote(struct MpeChannelState *state, double pressure, uint32_t de
 
   state->volume = pressure;
 
+  /* rate limit pressure updates */
   if (state->volumeAge + deltaUsecs < pressureBackoff * concurrentNotes) {
     state->volumeAge += deltaUsecs;
-    return;
+    return true;
   }
 
-  int max = 127;
+  int max = maxMpePressure;
 
-  uint16_t volume = doMpeDynamicPressure ? pressure * max : max;
+  uint16_t volume = doMpeDynamicPressure ? pressure * (float)max : max;
   if (volume > max) {
     volume = max;
   }
@@ -1813,12 +1920,18 @@ void continueMpeNote(struct MpeChannelState *state, double pressure, uint32_t de
     if (volume != state->lastVolume) {
       if (midiType == mpe) {
         midiAfterTouch(volume, state->channel+1);
+        //Serial.println("aftertouch " + String(volume));
       } else {
-        midiControlChange(pressureCC, volume, state->channel+1);
+        if (pressureCC != 128) {
+          midiControlChange(pressureCC, volume, state->channel+1);
+        }
       }
       state->lastVolume = volume;
       state->volumeAge = 0;
+    } else {
+      //Serial.println("aftertouch " + String(volume) + " (not sent, no change)");
     }
+
     if (doMpePolyAfterTouch) {
       uint8_t atPressure = pressure <= mpePolyAfterTouchMin
         ? 0
@@ -1828,13 +1941,21 @@ void continueMpeNote(struct MpeChannelState *state, double pressure, uint32_t de
       if (atPressure != state->lastPolyAT) {
         midiPolyAfterTouch(state->lastNote, atPressure, state->channel+1);
         state->lastPolyAT = atPressure;
-        Serial.println("poly aftertouch " + String(atPressure));
+        //Serial.println("poly aftertouch " + String(atPressure));
       }
     }
   } else {
     Serial.print(".");
     state->volumeAge += deltaUsecs;
   }
+
+  if (pressure <= 0.0f && delayNoteOff) {
+    if (endMpeNote(state)) {
+      return false;
+    }
+  }
+  
+  return true;
 }
 
 bool endMpeNote(struct MpeChannelState *state) {
@@ -1842,7 +1963,7 @@ bool endMpeNote(struct MpeChannelState *state) {
     state->age = 0;
     /* if note wasn't already stolen */
     if (state->playing == true) {
-      midiNoteOff(state->lastNote, 5, state->channel+1);
+      midiNoteOff(state->lastNote, 63, state->channel+1);
       state->lastPolyAT = 0;
       noteOffCount++;
     }
@@ -1881,16 +2002,21 @@ void doMpeMasterPitchbend(double pbUp, double pbDown, uint32_t deltaUsecs) {
   masterPbAge = 0;
 }
 
-#define useUsbFlag         (1 << 0)  /* output MIDI on usb port */
-#define useDinFlag         (1 << 1)  /* output MIDI on DIN5 port */
-#define noVelocityFlag     (1 << 2)  /* don't bother sending dynamic velocity */
-#define noPressureFlag     (1 << 3)  /* don't bother sending pressure */
-#define skipChannel10Flag  (1 << 4)  /* some synths like to put percussion on channel 10 by default */
-#define gmFlag             (1 << 5)  /* does this synth have a "general midi" mode? */
-#define gm2Flag            (1 << 6)  /* does this synth have a "general midi 2" mode ? */
-#define forcePbRangeFlag   (1 << 7)  /* send MIDI commands to set pitch bend range explicitly */
-#define polyAfterTouchFlag (1 << 8)  /* send poly aftertouch commands */
-#define ccResetFlag        (1 << 9)  /* reset a bunch of CCs to reasonable defaults */
+#define useUsbFlag          (1 << 0)  /* output MIDI on usb port */
+#define useDinFlag          (1 << 1)  /* output MIDI on DIN5 port */
+#define noVelocityFlag      (1 << 2)  /* don't bother sending dynamic velocity */
+#define noPressureFlag      (1 << 3)  /* don't bother sending pressure */
+#define skipChannel10Flag   (1 << 4)  /* some synths like to put percussion on channel 10 by default */
+#define gmFlag              (1 << 5)  /* does this synth have a "general midi" mode? */
+#define gm2Flag             (1 << 6)  /* does this synth have a "general midi 2" mode ? */
+#define forcePbRangeFlag    (1 << 7)  /* send MIDI commands to set pitch bend range explicitly */
+#define polyAfterTouchFlag  (1 << 8)  /* send poly aftertouch commands */
+#define ccResetFlag         (1 << 9)  /* reset a bunch of CCs to reasonable defaults */
+#define multicastTimbreFlag (1 << 10)
+#define delayNoteOffFlag    (1 << 11) /* defer note-off according to pressure slew limiter */
+#define noteOnFirstFlag     (1 << 12) /* send note on before pressure */
+#define maxPressure126Flag  (1 << 13) /* limit max pressure to 126 */
+#define bendUpOnlyFlag      (1 << 14) /* don't bend down for pitch correction, only up */
 
 struct MpeSettings {
   enum midiType midiType;
@@ -1907,18 +2033,17 @@ struct MpeSettings {
   uint32_t flags;
 };
 
-struct MpeSettings mpeSettingsUsbMidi = {multitimbral, 16,  2,  1000, 7,  0,  127, 0,  0,  127, 0,  useUsbFlag | polyAfterTouchFlag};
-
-struct MpeSettings mpeSettingsXV2020  = {multitimbral, 16,  2, 15000, 7,  87, 87,  87, 64, 67,  64, useDinFlag | skipChannel10Flag | gmFlag | gm2Flag | noPressureFlag};
-struct MpeSettings mpeSettingsRD300NX = {multitimbral, 16,  2,  1000, 7,  84, 121, 84, 0,  127, 0,  useDinFlag | gmFlag};
-struct MpeSettings mpeSettingsFB01    = {multitimbral, 8,   2,  1000, 7,  0,  0,   0,  0,  0,   0,  useDinFlag};
-struct MpeSettings mpeSettingsKSP     = {multitimbral, 4,  12,  1000, 1,  0,  0,   0,  0,  0,   0,  useDinFlag};
-struct MpeSettings mpeSettingsTrinity = {multitimbral, 16,  2,  1000, 7, 0,  0,   0,  0,  3,   0,  useDinFlag | forcePbRangeFlag | gmFlag};
-struct MpeSettings mpeSettingsSP300   = {multitimbral, 16,  2,  1000, 7,  0,  0,   0,  0,  0,   0,  useDinFlag};
-struct MpeSettings mpeSettingsSurgeXT = {mpe,          16, 48,  1000, 74, 0,  0,   0,  0,  0,   0,  useUsbFlag};
-struct MpeSettings mpeSettingsProteus = {multitimbral, 16,  2,  1000, 7,  0,  4,   4,  0,  7,   0,  useDinFlag | gmFlag | forcePbRangeFlag};
-struct MpeSettings mpeSettingsMox8    = {multitimbral, 16,  2,  1400, 7,  63, 63,  63, 0,  7,   0,  useDinFlag | gmFlag | forcePbRangeFlag | ccResetFlag};
-struct MpeSettings mpeSettingsPhatty  = {monovoice,    1,   2,  1000, 19, 0,  0,   0,  0,  0,   0,  useDinFlag | forcePbRangeFlag};
+struct MpeSettings mpeSettingsUsbMidi = {multitimbral, 16,  2,  1000, 7,   0,  127, 0,  0,  127, 0,  useUsbFlag | polyAfterTouchFlag};
+struct MpeSettings mpeSettingsXV2020  = {multitimbral, 16,  2, 15000, 7,   87, 87,  87, 64, 67,  64, useDinFlag | skipChannel10Flag | gmFlag | gm2Flag | noPressureFlag};
+struct MpeSettings mpeSettingsRD300NX = {multitimbral, 16,  2,  1000, 7,   84, 121, 84, 0,  127, 0,  useDinFlag | gmFlag};
+struct MpeSettings mpeSettingsFB01    = {multitimbral, 8,   2,  1000, 7,   0,  0,   0,  0,  0,   0,  useDinFlag};
+struct MpeSettings mpeSettingsKSP     = {multitimbral, 4,  12,  1000, 1,   0,  0,   0,  0,  0,   0,  useDinFlag | bendUpOnlyFlag};
+struct MpeSettings mpeSettingsTrinity = {multitimbral, 16,  2,  1000, 7,   0,  0,   0,  0,  3,   0,  useDinFlag | forcePbRangeFlag | gmFlag};
+struct MpeSettings mpeSettingsSP300   = {multitimbral, 16,  2,  1000, 7,   0,  0,   0,  0,  0,   0,  useDinFlag};
+struct MpeSettings mpeSettingsSurgeXT = {mpe,          16, 48,  1000, 128, 0,  0,   0,  0,  0,   0,  useUsbFlag | multicastTimbreFlag | noteOnFirstFlag | maxPressure126Flag };
+struct MpeSettings mpeSettingsProteus = {multitimbral, 16,  2,  1000, 7,   0,  4,   4,  0,  7,   0,  useDinFlag | gmFlag | forcePbRangeFlag};
+struct MpeSettings mpeSettingsMox8    = {multitimbral, 16,  2,  1400, 7,   63, 63,  63, 0,  7,   0,  useDinFlag | gmFlag | forcePbRangeFlag | ccResetFlag};
+struct MpeSettings mpeSettingsPhatty  = {monovoice,    1,   2,  1000, 19,  0,  0,   0,  0,  0,   0,  useDinFlag | forcePbRangeFlag};
 
 void sendMpeZones() {
   midiReadyWait();
@@ -1936,7 +2061,18 @@ void applyMpeSettings(struct MpeSettings *settings) {
   midiType = settings->midiType;
   pressureBackoff = settings->pressureBackoff;
   pbRange = settings->pbRange;
+  if (pressureCC != 128 && settings->pressureCC != 128) {
+    ccs[pressureCC].noMulticast = false;
+  }
   pressureCC = settings->pressureCC;
+  if (pressureCC != 128) {
+    ccs[pressureCC].noMulticast = true;
+  }
+  if (midiType == mpe && (settings->flags & multicastTimbreFlag ) > 0) {
+    ccs[74].forceMulticast = true;
+  } else {
+    ccs[74].forceMulticast = false;
+  }
   mpeBankMsbMin = settings->bankMsbMin;
   mpeBankMsbMax = settings->bankMsbMax;
   mpeBankLsbMin = settings->bankLsbMin;
@@ -1948,6 +2084,10 @@ void applyMpeSettings(struct MpeSettings *settings) {
   doMpeDynamicPressure = (settings->flags & noPressureFlag) == 0;
   doMpePolyAfterTouch = (settings->flags & polyAfterTouchFlag) != 0;
   forcePbRange = (settings->flags & forcePbRangeFlag) != 0;
+  delayNoteOff = (settings->flags & delayNoteOffFlag) != 0;
+  maxMpePressure = (settings->flags & maxPressure126Flag) != 0 ? 126 : 127;
+  noteOnFirst = (settings->flags & maxPressure126Flag) != 0;
+  bendUpOnly = (settings->flags & bendUpOnlyFlag) != 0;
 
   switch (settings->midiType) {
     case multitimbral:
@@ -2002,8 +2142,8 @@ void mpeStop() {
       midiPitchBend(0, i+1);
       
       state->lastPitchBend = 0;
-      state->lastVolume = 127;
-      state->lastFilter = 127;
+      state->lastVolume = 128;
+      state->lastFilter = 128;
       state->owner = noOne;
     }
   }
@@ -2033,9 +2173,9 @@ void mpeSetup() {
   }
 
   applyMpeSettings(&mpeSettingsSurgeXT);
-  //applyMpeSettings(&mpeSettingsUsbMidi);
 }
 
+/* Used by MOX8 device preset */
 void mpeCCReset(){
   for (int channel = firstMpeChannel; channel < firstMpeChannel + mpeChannels; channel++) {
     midiReadyWait();
@@ -2070,17 +2210,22 @@ void mpeCCReset(){
 int idleCount = 0;
 
 void mpeUpdate(uint32_t deltaUsecs) {
+  uint16_t channelMask = 0;
   for (int channel = firstMpeChannel; channel < firstMpeChannel + mpeChannels; channel++) {
     struct MpeChannelState *state = &mpeState[channel];
     if (state->owner == noOne) {
       state->age += deltaUsecs;
+      if (state->playing) {
+        continueMpeNote(state, 0.0f, deltaUsecs);
+      }
     }
 
+    /*
     float volume = state->volume - releaseRate * ((float)deltaUsecs/1000000.0f);
     if (volume < 0.0f) {
       volume = 0.0f;
     }
-    state->volume = volume;
+    state->volume = volume; */
 
     if (midiIdle()) {
       idleCount += deltaUsecs;
@@ -2093,22 +2238,33 @@ void mpeUpdate(uint32_t deltaUsecs) {
       prepareChannel(state);
     }
 
-    /* We've changed the CC we're using for pressure, so reset both the old one and the new oneto full on. */
+    /* We've changed the CC we're using for pressure, so reset both the old one and the new one to full on. */
     if (pressureCC != pressureCCSet) {
       midiReadyWait();
       midiControlChange(pressureCCSet, 127, channel+1);
       midiControlChange(pressureCC, 127, channel+1);
       state->lastVolume = 127;
     }
+
+    if (mpeChannels != mpeChannelsSet) {
+      if (midiType == mpe && firstMpeChannel + mpeChannels > 16) {
+        mpeChannels = 15;
+      }
+      mpeStop();
+      sendMpeZones();
+      mpeChannelsSet = mpeChannels;
+    }
+    channelMask |= 1 << channel;
   }
 
-  /* process any recent configuration changes */
+  /* process any changes to current active device preset */
   if (mpeSettings != nullptr && mpeSettings != currentMpeSettings) {
     mpeStop();
     applyMpeSettings(mpeSettings);
     currentMpeSettings = mpeSettings;
   }
 
+  /* process bank MSB/LSB unlock */
   if (unlockBankRange && !unlockBankRangeSet) {
     mpeBankMsbMax = 127;
     mpeBankMsbMin = 0;
@@ -2117,6 +2273,7 @@ void mpeUpdate(uint32_t deltaUsecs) {
     unlockBankRangeSet = unlockBankRange;
   }
 
+  /* process bank MSB/LSB lock */
   if (!unlockBankRange && unlockBankRangeSet) {
     mpeBankMsbMax = currentMpeSettings->bankMsbMax;
     mpeBankMsbMin = currentMpeSettings->bankMsbMin;
@@ -2125,7 +2282,48 @@ void mpeUpdate(uint32_t deltaUsecs) {
     unlockBankRangeSet = unlockBankRange;
   }
 
-  pressureCCSet = pressureCC;
+  /* handle changes to pressureCC */
+  if (pressureCC != pressureCCSet) {
+    if (pressureCC != 128) {
+      ccs[pressureCC].noMulticast = false;
+    }
+    pressureCCSet = pressureCC;
+    if (pressureCC != 128) {
+      ccs[pressureCC].noMulticast = true;
+    }
+  }
+
+  /* send out any backlog of CC messages as output buffer space allows */
+  bool congested = false;
+
+  for (int cc = 0; cc < 127 && !congested; cc++) {
+    if ((ccs[cc].dirty & channelMask) > 0) {
+      Serial.println("dirty ccs " + String(cc) + " mask " + String(ccs[cc].dirty));
+      if (midiType == mpe && !ccs[cc].forceMulticast) {
+        Serial.println("mpe multicast");
+        if (midiReadyLowPriority()) {
+          midiControlChange(cc, ccs[cc].value, firstMpeChannel);
+          ccs[cc].dirty = 0;
+          Serial.println("sent multicast cc " + String(cc) + " value " + String(ccs[cc].value));
+        } else {
+          congested = true;
+        }
+      } else {
+        Serial.println("non-mpe manual multicast, nomulticast " + String(ccs[cc].noMulticast));
+        for (int channel = firstMpeChannel; channel < firstMpeChannel + mpeChannels && !congested; channel++) {
+          if (((1 << channel) & ccs[cc].dirty) != 0 && !ccs[cc].noMulticast) {
+            if (midiReadyLowPriority()) {
+              midiControlChange(cc, ccs[cc].value, channel+1);
+              ccs[cc].dirty &= ~(1 << channel);
+              Serial.println("sent cc " + String(cc) + " value " + String(ccs[cc].value) + " on channel " + String(channel+1));
+            } else {
+              congested = true;
+            }
+          }
+        }
+      }
+    }    
+  }
 }
 
 /* Setup, Main Loop */
@@ -2167,9 +2365,9 @@ float lerp(float a, float b, float c){
   float vector = b-a;
   float value = vector / range;
   if (value < 0.0) {
-    return 0;
-  } else if (value > 1.0) {
-    return 1.0;
+    return 0.0f;
+  } else if (value > 1.0f) {
+    return 1.0f;
   } else {
     return value;
   }
@@ -2265,9 +2463,57 @@ struct Key {
   float lastPressure;
 };
 
+enum knobState {
+  disabled,        /* no function is assigned to this knob */
+  uninitialized,   /* we have not yet read an initial value */
+  inactive,        /* we're suppressing output until the user wiggles the knob the first time */
+  active           /* knob is in use */
+};
+
+struct Knob {
+  Knob() {};
+  float max = 9000.0;
+  float min = 300.0;
+
+  float valueUpperBound = 100.0;
+  float valueLowerBound = 0.0;
+  float hysteresis = 500.0;
+  float current;
+  uint32_t data = 0;
+  float initial = 0.0f;
+  enum knobState state = disabled;
+  bool activeByDefault = false;
+  void (*action)(uint32_t data, float current) = nullptr;
+  String label = "";
+};
+
+void knobCCAction(uint32_t cc, float value) {
+  mpeMulticastCC(cc, value);
+}
+
+void knobReleaseRateAction(uint32_t unused, float value) {
+  if (value < 0.01f) {
+    value = 0.01f;
+  }
+
+  releaseRate = 0.3f / value;
+}
+
+void knobPressureExponentAction(uint32_t unused, float value) {
+  value = clamp(value);
+
+  float min = 0.25f;
+  float max = 2.0f;
+
+  pressureExponent = min + (value * (max - min));
+}
+
 #define maxKeys 113
 struct Key keys[maxKeys];
 int keyAllocIdx = 0;
+
+#define maxKnobs 10
+struct Knob knobs[maxKnobs];
 
 #define controlNameLen (13)
 
@@ -2362,22 +2608,17 @@ void keyUpdate(struct Control* control, uint32_t deltaUsecs) {
   }
 
   float intensity = 1.0f;
-  if (pressure > 0.0f && (doMpeDynamicPressure || doMpePolyAfterTouch)) {
-    intensity = pow(pressure, 0.8f);
-    
-    /*
-    float minIntensity = key->intensity - releaseRate * ((float)deltaUsecs/1000000.0f);
-
-    if (intensity < minIntensity) {
-      intensity = minIntensity;
-    } */
-
-    if (intensity < 0.0f) {
+  if (doMpeDynamicPressure || doMpePolyAfterTouch) {
+    if (pressure > 0.01f) {
+      if (pressure < 1.0f) {
+        intensity = pow(pressure - 0.01f, pressureExponent);
+      }
+    } else {
       intensity = 0.0f;
     }
   }
 
-  if (pressure > 0.01f && (lastPressure > 0.01f || velocity == 1.0f || !doMpeDynamicVelocity)) {
+  if (pressure > 0.01f && (lastPressure > 0.01f || pressure >= 1.0f || !doMpeDynamicVelocity)) {
     switch (key->state) {
       case idle:
       case releasing:
@@ -2395,27 +2636,43 @@ void keyUpdate(struct Control* control, uint32_t deltaUsecs) {
           key->mpeState = nullptr;
           break;
         }
-        continueMpeNote(key->mpeState, intensity, deltaUsecs);
         key->intensity = intensity;
+        if (!continueMpeNote(key->mpeState, intensity, deltaUsecs)) {
+          key->mpeState->owner = noOne;
+          key->mpeState = nullptr;
+          key->state = releasing;
+        }
         break;
       case stolen:
         break;
     }
-  } else if (pressure <= 0 && (lastPressure <= 0 || !doMpeDynamicVelocity)) {
+  } else if (pressure <= 0.0f && (lastPressure <= 0.0f || !doMpeDynamicVelocity)) {
     switch (key->state) {
       case idle:
       case releasing:
         break;
       case playing:
-      case stolen:
-        if (endMpeNote(key->mpeState)) {
-          key->mpeState->owner = noOne;
-          key->mpeState = nullptr;
-          key->state = releasing;
+        if (delayNoteOff && doMpeDynamicPressure) {
+          key->intensity = intensity;
+          if (!continueMpeNote(key->mpeState, intensity, deltaUsecs)) {
+            key->mpeState->owner = noOne;
+            key->mpeState = nullptr;
+            key->state = releasing;
+          }
         } else {
-          Serial.print("!");
+          if (endMpeNote(key->mpeState)) {
+            key->mpeState->owner = noOne;
+            key->mpeState = nullptr;
+            key->state = releasing;
+          } else {
+            Serial.print("!");
+          }
+          key->intensity = 0.0;
         }
-        key->intensity = 0.0;
+        break;
+      case stolen:
+        key->mpeState = nullptr;
+        key->state = idle;
         break;
     }
   }
@@ -2457,21 +2714,92 @@ bool debounce(struct Control* control, uint32_t deltaUsecs) {
 void menuButtonUpdate(struct Control* control, uint32_t deltaUsecs) {
   check_debounce;
   int button = control->data;
-  int value = values[control->bit][control->channel];
-  int pressure = (4095-value) - control->thresholdPressure;
-  if (pressure > 100) {
+  float force = forces[control->bit][control->channel];
+  if (force > 0.02) {
     if (!control->held) {
-      menuPress(button, pressure, deltaUsecs);
+      menuPress(button, force, deltaUsecs);
       control->held = true;
-      Serial.println("menu button " + String(button) + " pressed");
+      Serial.println("menu button " + String(button + 1) + " pressed");
     }
-  } else {
+  }
+  
+  if (force <= 0.0) {
     if (control->held) {
-      Serial.println("menu button " + String(button) + " released");
-      menuRelease(button, pressure, deltaUsecs);
+      menuRelease(button, force, deltaUsecs);
       control->held = false;
-      Serial.println("menu Release called");
+      Serial.println("menu button " + String(button + 1) + " released");
     }
+  }
+}
+
+void knobUpdate(struct Control* control, uint32_t deltaUsecs) {
+  int knobIndex = control->data;
+  struct Knob *knob = &knobs[knobIndex];
+  float r = resistances[control->bit][control->channel];
+  float h = knob->hysteresis;
+  bool newval = false;
+
+  switch (knob->state) {
+    case disabled:
+      return;
+    case uninitialized:
+      if (knob->activeByDefault) {
+        knob->state = active;
+      } else {
+        knob->initial = r;
+        knob->state = inactive;
+        return;
+      }
+      break;
+    case inactive:
+      {
+        float excursion = abs(r - knob->initial);
+        if (excursion > knob->hysteresis * 4.0f) {
+          knob->state = active;
+          break;
+        }
+      }
+      return;
+    case active:
+      break;
+  }
+
+  if (r > knob->max) {
+    r = knob->max;
+  }
+
+  if (r < knob->min) {
+    r = knob->min;
+  }
+
+  if (r > knob->valueUpperBound) {
+    knob->valueUpperBound = r + (h * 0.10f);
+    knob->valueLowerBound = r - (h * 0.90f);
+    newval = true;
+  }
+
+  if (r < knob->valueLowerBound) {
+    knob->valueLowerBound = r - (h * 0.10f);
+    knob->valueUpperBound = r + (h * 0.90f);
+    newval = true;
+  }
+
+  if (newval) {
+    float current = (r - knob->min) / (knob->max - knob->min);
+    if (current > 1.0f) {
+      current = 1.0f;
+    } else if (current < 0.0f) {
+      current = 0.0f;
+    }
+    knob->current = current;
+
+    Serial.println("knob " + String(knobIndex + 1) + " value " + String(knob->current));
+
+    if (knob->action != nullptr) {
+      knob->action(knob->data, current);
+    }
+
+    status1TextUpdate(knob->label, 500000);
   }
 }
 
@@ -2487,11 +2815,10 @@ void scrollUpUpdate(struct Control* control, uint32_t deltaUsecs) {
     return;
   }
 
-  int value = values[control->bit][control->channel];
-  int pressure = (4095-value) - control->thresholdPressure;
-  if (pressure > 0) {
+  float force = forces[control->bit][control->channel];
+  if (force > 0.0f) {
     menuScroll(-1);
-    control->delay = 100000;
+    control->delay = (uint32_t)((1.2f - clamp(force)) * 200000.0f);
   }
 }
 
@@ -2507,31 +2834,10 @@ void scrollDownUpdate(struct Control* control, uint32_t deltaUsecs) {
     return;
   }
 
-  int value = values[control->bit][control->channel];
-  int pressure = (4095-value) - control->thresholdPressure;
-  if (pressure > 0) {
+  float force = forces[control->bit][control->channel];
+  if (force > 0.0f) {
     menuScroll(1);
-    control->delay = 100000;
-  }
-}
-
-void allNotesOffSlowUpdate(struct Control* control, uint32_t deltaUsecs) {
-  check_debounce;
-
-  int value = values[control->bit][control->channel];
-  int pressure = (4095-value) - control->thresholdPressure;
-  if (pressure > 0) {
-    for (int channel = firstMpeChannel; channel < firstMpeChannel + mpeChannels; channel++) {
-      for (int note = 0; note < 128; note++) {
-        while (!midiReady()) {
-          delayMicroseconds(100);
-        }
-        midiNoteOff(note, 63, channel+1);
-      }
-    }
-
-    control->delay = 100000;
-    Serial.println("all notes off (the slow way)");
+    control->delay = (uint32_t)((1.2f - clamp(force)) * 200000.0f);
   }
 }
 
@@ -2581,29 +2887,29 @@ void statusTextUpdate() {
   int closestSemitone = (cents + 50.0)/100.0;
   String name;
   switch (closestSemitone) {
-     case (0): name = "C"; break;
-     case (1): name = "C#"; break;
-     case (2): name = "D"; break;
-     case (3): name = "D#"; break;
-     case (4): name = "E"; break;
-     case (5): name = "F"; break;
-     case (6): name = "F#"; break;
-     case (7): name = "G"; break;
-     case (8): name = "G#"; break;
-     case (9): name = "A"; break;
+     case (0):  name = "C";  break;
+     case (1):  name = "C#"; break;
+     case (2):  name = "D";  break;
+     case (3):  name = "D#"; break;
+     case (4):  name = "E";  break;
+     case (5):  name = "F";  break;
+     case (6):  name = "F#"; break;
+     case (7):  name = "G";  break;
+     case (8):  name = "G#"; break;
+     case (9):  name = "A";  break;
      case (10): name = "A#"; break;
-     case (11): name = "B"; break;
-     case (12): name = "C"; break;
-     default: name = "?"; break;
+     case (11): name = "B";  break;
+     case (12): name = "C";  break;
+     default:   name = "?";  break;
   }
 
   String type;
   switch (midiType) {
-    case (monotimbral): type = "poly"; break;
-    case (mts): type = "mts"; break;
+    case (monotimbral):  type = "poly"; break;
+    case (mts):          type = "mts";  break;
     case (multitimbral): type = "midi"; break;
-    case (monovoice): type = "mono"; break;
-    case (mpe): type = "mpe"; break;
+    case (monovoice):    type = "mono"; break;
+    case (mpe):          type = "mpe";  break;
   }
 
   String output = "";
@@ -2619,68 +2925,53 @@ void statusTextUpdate() {
   windows[statusBar2].redraw = true;
 }
 
-void transposeUpUpdate(struct Control* control, uint32_t deltaUsecs) {
+void status1TextUpdate(String text, uint32_t usecs) {
+  windows[statusBar1].text = text;
+  windows[statusBar1].textUsecs = usecs;
+  windows[statusBar1].redraw = true;
+}
+
+void transposeUpdate(struct Control* control, uint32_t deltaUsecs, float transposeAmount) {
   check_debounce;
 
-  int value = values[control->bit][control->channel];
-  int pressure = (4095-value) - control->thresholdPressure;
-  if (pressure > 50) {
-    transpose *= 2.0;
-    if (transpose > 8.0) {
-      transpose = 8.0;
+  float force = forces[control->bit][control->channel];
+  if (force > 0.02f) {
+    if (!control->held) {
+      transpose *= transposeAmount;
+      if (transpose > 8.0f) {
+        transpose = 8.0f;
+      } else if (transpose < 0.25f) {
+        transpose = 0.25f;
+      }
+
+      statusTextUpdate();
+      setPitchReference(pitchReferenceHz());
+      control->held = true;
     }
-    control->delay = 200000;
-    statusTextUpdate();
-    setPitchReference(pitchReferenceHz());
   }
+  
+  if (force <= 0.0) {
+    if (control->held) {
+      control->held = false;
+      control->delay = 200000;
+    }
+  }
+}
+
+void transposeUpUpdate(struct Control* control, uint32_t deltaUsecs) {
+  transposeUpdate(control, deltaUsecs, 2.0f);
 }
 
 void transposeDownUpdate(struct Control* control, uint32_t deltaUsecs) {
-  check_debounce;
-
-  int value = values[control->bit][control->channel];
-  int pressure = (4095-value) - control->thresholdPressure;
-  if (pressure > 50) {
-    transpose *= 0.5;
-    if (transpose < 0.25) {
-      transpose = 0.25;
-    }
-    control->delay = 200000;
-    statusTextUpdate();
-    setPitchReference(pitchReferenceHz());
-  }
+  transposeUpdate(control, deltaUsecs, 0.5f);
 }
 
 void transposeUpSemitoneUpdate(struct Control* control, uint32_t deltaUsecs) {
-  check_debounce;
-
-  int value = values[control->bit][control->channel];
-  int pressure = (4095-value) - control->thresholdPressure;
-  if (pressure > 50) {
-    transpose *= semitone;
-    if (transpose > 8.0) {
-      transpose = 8.0;
-    }
-    control->delay = 200000;
-    statusTextUpdate();
-    setPitchReference(pitchReferenceHz());
-  }
+  transposeUpdate(control, deltaUsecs, semitone);
 }
 
 void transposeDownSemitoneUpdate(struct Control* control, uint32_t deltaUsecs) {
-  check_debounce;
-
-  int value = values[control->bit][control->channel];
-  int pressure = (4095-value) - control->thresholdPressure;
-  if (pressure > 50) {
-    transpose *= 1.0/semitone;
-    if (transpose < 0.25) {
-      transpose = 0.25;
-    }
-    control->delay = 200000;
-    statusTextUpdate();
-    setPitchReference(pitchReferenceHz());
-  }
+  transposeUpdate(control, deltaUsecs, 1.0f/semitone);
 }
 
 void editValueIncrementUpdate(struct Control* control, uint32_t deltaUsecs) {
@@ -2710,7 +3001,7 @@ void editValueDecrementUpdate(struct Control* control, uint32_t deltaUsecs) {
 
   check_debounce;
 
-   float force = forces[control->bit][control->channel];
+  float force = forces[control->bit][control->channel];
   if (force > 0.0f) {
     auto val = *(uint32_t*)(editItem->data);
     if (editItem->minValue == nullptr || val > *editItem->minValue) {
@@ -2720,18 +3011,6 @@ void editValueDecrementUpdate(struct Control* control, uint32_t deltaUsecs) {
       windows[visualizerWindow].redraw = true;
       control->delay = (uint32_t)((1.0 - force) * 200000.0);
     }
-  }
-}
-
-void mpeZoneUpdate(struct Control* control, uint32_t deltaUsecs) {
-  check_debounce;
-
-  int value = values[control->bit][control->channel];
-  int pressure = (4095-value) - control->thresholdPressure;
-  if (pressure > 0) {
-    sendMpeZones();
-    Serial.println("registering MPE zones");
-    control->delay = 100000;
   }
 }
 
@@ -2817,6 +3096,63 @@ void controlSetupController(uint16_t thresholdPressure, uint16_t maxPressure) {
   controls[1][0].data = backText;
   controls[6][0].update = editValueIncrementUpdate; // right
   controls[7][0].update = editValueDecrementUpdate; // left
+
+  controls[5][2].update = knobUpdate;
+  controls[5][2].data = 0;
+  controls[6][2].update = knobUpdate;
+  controls[6][2].data = 1;
+  controls[7][2].update = knobUpdate;
+  controls[7][2].data = 2;
+
+  controls[1][3].update = knobUpdate;
+  controls[1][3].data = 3;
+  controls[2][3].update = knobUpdate;
+  controls[2][3].data = 4;
+  controls[3][3].update = knobUpdate;
+  controls[3][3].data = 5;
+  controls[4][3].update = knobUpdate;
+  controls[4][3].data = 6;
+  controls[5][3].update = knobUpdate;
+  controls[5][3].data = 7;
+  controls[6][3].update = knobUpdate;
+  controls[6][3].data = 8;
+  controls[7][3].update = knobUpdate;
+  controls[7][3].data = 9;
+
+  knobs[3].data = 1; /* mod wheel */
+  knobs[3].action = &knobCCAction;
+  knobs[3].state = active;
+  knobs[3].label = "mod";
+
+  knobs[7].data = 74; /* filter cutoff / MPE timbre */
+  knobs[7].action = &knobCCAction;
+  knobs[7].state = active;
+  knobs[7].label = "timbre";
+
+  knobs[8].data = 71; /* filter resonance */
+  knobs[8].action = &knobCCAction;
+  knobs[8].state = uninitialized;
+  knobs[8].label = "resonance";
+
+  knobs[9].data = 11; /* filter resonance */
+  knobs[9].action = &knobCCAction;
+  knobs[9].state = uninitialized;
+  knobs[9].label = "volume";
+
+  knobs[6].data = 91; /* reverb send */
+  knobs[6].action = &knobCCAction;
+  knobs[6].state = uninitialized;
+  knobs[6].label = "reverb";
+
+  knobs[0].data = 0;
+  knobs[0].action = &knobReleaseRateAction;
+  knobs[0].state = active;
+  knobs[0].label = "slew";
+
+  knobs[1].data = 0;
+  knobs[1].action = &knobPressureExponentAction;
+  knobs[1].state = active;
+  knobs[1].label = "curve";
 }
 
 
@@ -2977,7 +3313,7 @@ void applyMpeSettingsAction(void *data) {
 
 bool enableVisualizer = true;
 bool lastEnableVisualizer = enableVisualizer;
-bool debugShowResistances = false;
+bool debugShowResistances = true;
 bool debugShowCalibration = false;
 
 struct MenuItem allNotesOffFastMenuItem("notes off", action);
@@ -3013,9 +3349,11 @@ struct MenuItem unlockBankRangeMenuItem("unlock", toggle, &unlockBankRange);
 
 uint32_t zero = 0;
 uint32_t maxMidiValue = 127;
+uint32_t maxChannels = 16;
 
 struct MenuItem pressureCCMenuItem("pressure CC", value, &pressureCC, &zero, &maxMidiValue);
 struct MenuItem mpeProgramChangeMenuItem("patch", value, &programChange, &zero, &maxMidiValue);
+struct MenuItem mpeChannelsMenuItem("channels", value, &mpeChannels, &zero, &maxChannels);
 
 struct MenuItem surgeXtPresetMenuItem("Surge XT", selection, &mpeSettings, (uint32_t)&mpeSettingsSurgeXT);
 struct MenuItem kspPresetMenuItem("Keystep Pro", selection, &mpeSettings, (uint32_t)&mpeSettingsKSP);
@@ -3038,9 +3376,11 @@ struct MenuItem yamahaMenu("Yamaha", submenu, &fb01PresetMenuItem, &moxPresetMen
 struct MenuItem* brandsMenu[] = {&arturiaMenu, &emuMenu, &korgMenu, &moogMenu, &rolandMenu, &surgeXtPresetMenuItem, &yamahaMenu};
 struct MenuItem outputPresetsMenu("dev presets", submenu, &brandsMenu[0], 7);
 struct MenuItem pbRangeMenu("bend range", submenu, &pb2MenuItem, &pb7MenuItem, &pb12MenuItem, &pb24MenuItem, &pb48MenuItem);
+struct MenuItem noteOnFirstMenuItem("note-on 1st", toggle, &noteOnFirst);
+struct MenuItem maxPressureMenuItem("max p", value, &maxMpePressure, &zero, &maxMidiValue);
 
-struct MenuItem* outputMenuItems[] = {&useUsbMenuItem, &useDinMenuItem, &mpeHandshakeMenuItem, &outputPresetsMenu, &pbRangeMenu, &pressureCCMenuItem};
-struct MenuItem outputMenu("output", submenu, &outputMenuItems[0], 6);
+struct MenuItem* outputMenuItems[] = {&useUsbMenuItem, &useDinMenuItem, &outputPresetsMenu, &mpeHandshakeMenuItem, &mpeChannelsMenuItem, &pbRangeMenu, &pressureCCMenuItem, &noteOnFirstMenuItem, &maxPressureMenuItem};
+struct MenuItem outputMenu("output", submenu, &outputMenuItems[0], 9);
 
 struct MenuItem controlsMenu("controls", submenu, &doVelocityMenuItem, &doPressureMenuItem, &doPolyAfterTouchMenuItem, &pressureBackoffMenuItem);
 
@@ -3053,9 +3393,7 @@ struct MenuItem debugMenu("debug", submenu, &debugShowResistancesMenuItem, &debu
 
 struct MenuItem configMenu("settings", submenu, &outputMenu, &controlsMenu, &interfaceMenu, &debugMenu);
 
-//struct MenuItem arpMenu("arpeggiator", submenu);
-
-struct MenuItem rootMenu("", submenu, &configMenu, &patchesMenu, &allNotesOffSlowMenuItem);
+struct MenuItem rootMenu("", submenu, &configMenu, &patchesMenu, &emptyMenuItem, &emptyMenuItem, &allNotesOffSlowMenuItem);
 
 void menuSetup() {
   menuSelect(&rootMenu, 0);
@@ -3389,13 +3727,16 @@ void loop() {
 
   screenRedrawAge += delta;
 
+  menuUpdate(delta);
+
   if (screenRedrawAge > maxRedrawAge) {
-    renderScreen();
+    renderScreen(screenRedrawAge);
     screenRedrawAge = 0;
   }
 
   if (verbose) {
     Serial.println(String("MIDI Sent: ") + midiMsgsSent + " received: " + midiMsgsReceived);
+    Serial.println("release rate" + String(releaseRate) + " pressure exponent " + String(pressureExponent));
   }
   iteration++;
 }
