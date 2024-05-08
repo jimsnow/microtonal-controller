@@ -720,14 +720,14 @@ void computeResistances(bool verbose, const int values[adcChannels], const float
   applyCalibration(verbose, calibrationMatrix, vAdc, resistances, iterations);
 }
 
-float zeroPressureResistance = 5000.0;
-float maxPressureResistance = 600.0;
+float zeroPressureResistance = 5000.0f;
+float maxPressureResistance = 600.0f;
 
 /*
  * Force can be outside range of 0 (minimum force) to 1 (maximum force)
  */
-inline float resistanceToForce(float r) {
-  return 1.0f - lerpNoClamp(1.0f / maxPressureResistance, 1.0f / r, 1.0f / zeroPressureResistance);
+inline float resistanceToForce(float r, float area = 1.0f) {
+  return 1.0f - lerpNoClamp(max(area, 2.0f) / maxPressureResistance, 1.0f / r, area / zeroPressureResistance);
 }
 
 /* Shift Registers */
@@ -1379,8 +1379,12 @@ void canUpdate() {
 bool useUsbMidi = true;
 bool useDinMidi = false;
 
+int noteOnCount = 0;
+int noteOffCount = 0;
+
 struct MidiLocalSettings : public MIDI_NAMESPACE::DefaultSettings {
   static const bool UseRunningStatus = true;  /* avoid re-sending status byte when it hasn't changed */
+  static const unsigned SysExMaxSize = 10;     /* we don't expect to receive sysex */
 };
 
 MIDI_CREATE_CUSTOM_INSTANCE(HardwareSerial, Serial5, dinMidi, MidiLocalSettings);
@@ -1389,6 +1393,7 @@ MIDI_CREATE_CUSTOM_INSTANCE(HardwareSerial, Serial5, dinMidi, MidiLocalSettings)
 
 uint64_t midiMsgsSent = 0;
 uint64_t midiMsgsReceived = 0;
+int pressureBackoff = 5000;
 
 #define doMidi(func, ...) { \
   midiMsgsSent++; \
@@ -1412,9 +1417,15 @@ uint64_t midiMsgsReceived = 0;
 
 void midiNoteOn(uint8_t note, uint8_t velocity, uint8_t channel) {
   doMidi(sendNoteOn, note, velocity, channel);
+  noteOnCount++;
 }
 
 void midiNoteOff(uint8_t note, uint8_t velocity, uint8_t channel) {
+  doMidi(sendNoteOff, note, velocity, channel);
+  noteOffCount++;
+}
+
+void midiNoteOffNoCount(uint8_t note, uint8_t velocity, uint8_t channel) {
   doMidi(sendNoteOff, note, velocity, channel);
 }
 
@@ -1462,7 +1473,20 @@ void midiRPN(uint8_t pmsb, uint8_t plsb, uint8_t v, uint8_t channel) {
 }
 
 void midiSysEx(uint32_t len, const byte *in) {
-  doMidi(sendSysEx, len, in);
+  doMidi(sendSysEx, len, in, true);
+}
+
+void sendDummySysEx() {
+  int len = 100;
+
+  byte buf[len];
+
+  for (int i=0; i<len; i++) {
+    buf[i] = i % 11;
+  }
+
+  midiSysEx(len, buf);
+  Serial.println("sent dummy sysex");
 }
 
 int midiBufferSize = 0;
@@ -1516,6 +1540,11 @@ void midiReadyWait() {
   };
 }
 
+
+float mpePolyAfterTouchMin = 0.75f;
+float mpePolyAfterTouchMax = 1.25f;
+
+
 /* MPE */
 
 int mpeChannels = 16;
@@ -1565,9 +1594,6 @@ uint32_t programChange = 0;
 bool doProgramChange = false;
 bool doMsb = false;
 bool doLsb = false;
-
-int noteOnCount = 0;
-int noteOffCount = 0;
 
 void mpeMulticastCC(uint8_t cc, float value) {
   int v = (int)(value * 127.0f);
@@ -1638,7 +1664,6 @@ struct MpeChannelState *getMpeChannel() {
     Serial.println("stealing note");
     midiNoteOff(state->lastNote, 127, bestChannel+1);
     state->playing = false;
-    noteOffCount++;
     if (state->stealCallback != nullptr) {
       state->stealCallback(state->owner);
     }
@@ -1667,6 +1692,10 @@ double pitchToCents(double pitch) {
   return (log(pitch) / log(2.0)) * 1200.0;
 }
 
+double pitchToOctaves(double pitch) {
+  return (log(pitch) / log(2.0));
+}
+
 double centsToPitch(double cents) {
   const double factor = pow(2.0, (1.0/1200.0));
   return pow(factor, cents);
@@ -1677,10 +1706,18 @@ double semitone = pow(2.0, (1.0/12.0));
 enum midiType {
   monovoice,
   monotimbral,
-  mts,
+  tuningtable,
   multitimbral,
   mpe
 };
+
+enum tuningTableType {
+  noTuningTable,
+  eTuningTable,
+  mtsTuningTable
+};
+
+enum tuningTableType tuningTableType;
 
 bool doMpeDynamicVelocity = true;
 bool doMpeDynamicPressure = true;
@@ -1698,7 +1735,6 @@ uint32_t mpeBankLsb = 0;
 bool unlockBankRange = false;
 bool unlockBankRangeSet = unlockBankRange;
 enum midiType midiType = mpe;
-int pressureBackoff = 5000;
 
 double masterPbUpRange = 3.0/2.0;
 double masterPbDownRange = 2.0/3.0;
@@ -1786,7 +1822,15 @@ void prepareChannel(struct MpeChannelState *state) {
 
 bool bendUpOnly = false;
 
-struct MpeChannelState *beginMpeNote(double pitch, int owner, double velocity, double pressure, void stealCallback(uint16_t)) {
+struct MpeChannelState *beginMpeNote(double pitch, double velocity, double pressure, uint16_t owner, void stealCallback(uint16_t)) {
+
+  int v = (int) (1.0 + (velocity*126));
+  if (v > 127) {
+    v = 127;
+  } else if (v < 1) {
+    v = 1;
+  }
+
   double shift = pitchToCents(pitch * transpose);
   //state->originalPitch = shift;
 
@@ -1812,14 +1856,6 @@ struct MpeChannelState *beginMpeNote(double pitch, int owner, double velocity, d
     pb = calculatePitchBend(0.0, 0.0, centsToPitch(cents), (double)pbRange);
   } else {
     pb = calculatePitchBend(pbUp, pbDown, centsToPitch(cents), (double)pbRange);
-  }
-
-  int v = (int) (1.0 + (velocity*126));
-
-  if (v > 127) {
-    v = 127;
-  } else if (v < 1) {
-    v = 1;
   }
 
   if (note < 0) {
@@ -1864,7 +1900,6 @@ struct MpeChannelState *beginMpeNote(double pitch, int owner, double velocity, d
 
     if (noteOnFirst) {
       midiNoteOn(note, v, state->channel+1);
-      noteOnCount++;
     }
 
     if (!continueMpeNote(state, pressure, 0)) {
@@ -1875,7 +1910,6 @@ struct MpeChannelState *beginMpeNote(double pitch, int owner, double velocity, d
 
     if (!noteOnFirst) {
       midiNoteOn(note, v, state->channel+1);
-      noteOnCount++;
     }
 
     Serial.println("note-on channel" + String(state->channel+1) + " note " + String(note) + " cents " + String(cents) + " (" + String(centsToPitch(cents)) + ") pb " + String(pb) + " pressure " + pressure);
@@ -1885,9 +1919,6 @@ struct MpeChannelState *beginMpeNote(double pitch, int owner, double velocity, d
 
   return state;
 }
-
-float mpePolyAfterTouchMin = 0.75f;
-float mpePolyAfterTouchMax = 1.25f;
 
 bool continueMpeNote(struct MpeChannelState *state, double pressure, uint32_t deltaUsecs) {
   uint32_t concurrentNotes = noteOnCount - noteOffCount;
@@ -1965,7 +1996,6 @@ bool endMpeNote(struct MpeChannelState *state) {
     if (state->playing == true) {
       midiNoteOff(state->lastNote, 63, state->channel+1);
       state->lastPolyAT = 0;
-      noteOffCount++;
     }
     state->playing = false;
     Serial.println("sent note-off channel " + String(state->channel+1) + " note " + String(state->lastNote));
@@ -1981,7 +2011,7 @@ void doMpeMasterPitchbend(double pbUp, double pbDown, uint32_t deltaUsecs) {
     return;
   }
 
-  if (midiType == mpe) {
+  if (midiType == mpe || midiType == tuningtable) {
     int16_t pbi = calculatePitchBend(pbUp, pbDown, 1.0, masterPbRange);
     if (pbi != lastMasterPb) {
       midiPitchBend(pbi, 1);
@@ -2002,6 +2032,247 @@ void doMpeMasterPitchbend(double pbUp, double pbDown, uint32_t deltaUsecs) {
   masterPbAge = 0;
 }
 
+/* TUNING TABLE MIDI */
+
+struct MidiNote {
+  MidiNote(uint8_t noteNumber, uint8_t channel) : noteNumber{noteNumber}, channel{channel} {};
+  uint8_t noteNumber = 0;
+  uint8_t channel = 0;
+};
+
+struct MidiTuningTableEntry {
+  uint8_t noteNumber;
+  uint8_t channel;
+  float pitch;
+  uint16_t users;
+  uint8_t lastPressure;
+  uint32_t pressureAge;
+};
+
+
+
+struct MidiTuningTableEntry *midiTuningTable = nullptr;
+int midiTuningTableSize = 0;
+
+struct MidiTuningTableEntry *tuningTableLookup(float pitch, struct MidiTuningTableEntry tt[], int ttSize) {
+
+  /* tuning table isn't guaranteed to be sorted; we could sort it and speed this up with binary search */
+  float bestError = 1000.0f;
+  struct MidiTuningTableEntry *bestMatch = nullptr;
+
+  for (int i = 0; i < ttSize; i++) {
+    float error = abs((pitch / tt[i].pitch) - 1.0f);
+    if (error < bestError) {
+      bestError = error;
+      bestMatch = &tt[i];
+    }
+  }
+
+  return bestMatch;
+}
+
+
+struct MidiTuningTableEntry* beginTuningTableNote(double pitch, double velocity, double pressure, uint16_t owner, void stealCallback(uint16_t)) {
+  if (midiTuningTable == nullptr || midiTuningTableSize == 0) {
+    return nullptr;
+  }
+
+  struct MidiTuningTableEntry *tte = tuningTableLookup(pitch, midiTuningTable, midiTuningTableSize);
+  
+  if (midiReady()) {
+    int v = (int) (1.0 + (velocity*126));
+    if (v > 127) {
+      v = 127;
+    } else if (v < 1) {
+      v = 1;
+    }
+
+    midiNoteOn(tte->noteNumber, v, tte->channel + 1);
+    tte->users++;
+    tte->lastPressure = 127;
+    tte->pressureAge = 0;
+    return tte;
+  }
+
+  return nullptr;
+}
+
+
+bool continueTuningTableNote(struct MidiTuningTableEntry *tte, double pressure, uint32_t deltaUsecs) {
+  uint32_t concurrentNotes = noteOnCount - noteOffCount;
+
+  if (pressure < 0.0f) {
+    pressure = 0.0f;
+  }
+
+  /* rate limit pressure updates */
+  if (tte->pressureAge + deltaUsecs < pressureBackoff * concurrentNotes) {
+    tte->pressureAge += deltaUsecs;
+    return true;
+  }
+
+  if (!midiReady()) {
+    return true;
+  }
+
+  if (doMpePolyAfterTouch) {
+    int max = mpePolyAfterTouchMax;
+    int min = mpePolyAfterTouchMin;
+    uint8_t atPressure = pressure <= min
+      ? 0
+      : pressure >= max
+        ? 127
+        : ((pressure - min) / (max - min)) * 127;
+
+    if (atPressure != tte->lastPressure) {
+      midiPolyAfterTouch(tte->noteNumber, atPressure, tte->channel+1);
+      tte->lastPressure = atPressure;
+    }
+
+    tte->pressureAge = 0;
+  }
+
+  return true; 
+}
+
+bool endTuningTableNote(struct MidiTuningTableEntry* tte) {
+  if (midiReady()) {
+    midiNoteOff(tte->noteNumber, 63, tte->channel + 1);
+    tte->users--;
+    return true;
+  }
+
+  return false;
+}
+
+/* return the buffer offset for a given midi note and sub-byte */
+#define eTuningTableOffset(index, field) (7 + (index * 4) + field)
+
+/*
+ * tuning table setup for the Grey Matter E! expansion board for Yamaha DX7
+ */
+void sendETuningTable(uint8_t channel = 0) {
+  uint8_t buffer[521];
+
+  buffer[0] = 0xf0; // SysEx begin
+  buffer[1] = 0x12; // Grey Matter ID number
+  buffer[2] = channel & 0xf;
+  buffer[3] = 0x00; // 00 = E! for DX7
+  buffer[4] = 0x00; // module number (if more than one E! is listening on same midi channel)
+  buffer[5] = 0x05; // bank
+  buffer[6] = 0x02; // tuning table (1 scale)
+
+  for (int midiKey = 0; midiKey < 128; midiKey++) {
+    for (int field = 0; field < 4; field++) {
+      buffer[eTuningTableOffset(midiKey, field)] = 0x00;
+    }
+  }
+
+  for (int i = 0; i < midiTuningTableSize; i++) {
+    struct MidiTuningTableEntry *tte = &midiTuningTable[i];
+    uint8_t note = tte->noteNumber;
+
+    float pitch = tte->pitch * transpose;
+    float octaves = pitchToOctaves(pitch) + 5.0f;
+    uint8_t octave = (uint8_t)octaves;
+
+    uint32_t remainder = (octaves - octave) * 4096.0f;
+
+    buffer[eTuningTableOffset(note, 0)] = octave;
+    buffer[eTuningTableOffset(note, 1)] = (remainder & 0x0f00) >> 8;
+    buffer[eTuningTableOffset(note, 2)] = (remainder & 0x00f0) >> 4;
+    buffer[eTuningTableOffset(note, 3)] =  remainder & 0x000f;
+
+    Serial.println("Tuning Table Entry " + String(note) + " octave " + String(octave) + " + " + String(remainder) + " / 4096");
+  }
+
+  /* incorrect checksum generates a warning */
+  uint8_t sum = 0;
+  for (int i = 7; i < 519; i++) {
+    sum += buffer[i];
+  }
+
+  uint8_t checksum = (((~sum) & 0x7f) + 1) & 0x7f;
+
+  buffer[519] = checksum;
+  buffer[520] = 0xf7; /* end SysEx */
+
+  midiSysEx(521, buffer);
+}
+
+/* GENERIC VOICE API */
+
+struct VoiceHandle {
+  int stolen(int owner) {
+    if (this->midiType == tuningtable) {
+      return false;
+    }
+
+    if (!mpeState) {
+      return true;
+    }
+
+    return mpeState->owner != owner;
+  }
+
+  enum midiType midiType;
+  union {
+    struct MpeChannelState *mpeState;
+    struct MidiTuningTableEntry *tte;
+  };
+};
+
+bool beginNote(struct VoiceHandle &voiceHandle, float pitch, float velocity, float pressure, uint16_t owner, void stealCallback(uint16_t)) {
+  switch (midiType) {
+    case tuningtable:
+      {
+        struct MidiTuningTableEntry *tte = beginTuningTableNote(pitch, velocity, pressure, owner, stealCallback);
+        if (tte == nullptr) {
+          return false;
+        }
+        voiceHandle.tte = tte;
+        break;
+      }
+    default:
+      {
+        struct MpeChannelState *state = beginMpeNote(pitch, velocity, pressure, owner, stealCallback);
+        if (state == nullptr) {
+          return false;
+        }
+        state->owner = owner;
+        voiceHandle.mpeState = state;
+        break;
+      }
+  }
+
+  voiceHandle.midiType = midiType;
+  return true;
+}
+
+bool continueNote(struct VoiceHandle& voiceHandle, float pressure, uint32_t deltaUsecs) {
+  switch (voiceHandle.midiType) {
+    case tuningtable:
+      return continueTuningTableNote(voiceHandle.tte, pressure, deltaUsecs);
+    default:
+      return continueMpeNote(voiceHandle.mpeState, pressure, deltaUsecs);
+  }
+}
+
+bool endNote(struct VoiceHandle& voiceHandle) {
+  switch (voiceHandle.midiType) {
+    case tuningtable:
+      return endTuningTableNote(voiceHandle.tte);
+    default:
+      if(endMpeNote(voiceHandle.mpeState)) {
+        voiceHandle.mpeState->owner = noOne;
+        return true;
+      }
+      return false;
+  }
+}
+
+/* MIDI/MPE SETTINGS */
+
 #define useUsbFlag          (1 << 0)  /* output MIDI on usb port */
 #define useDinFlag          (1 << 1)  /* output MIDI on DIN5 port */
 #define noVelocityFlag      (1 << 2)  /* don't bother sending dynamic velocity */
@@ -2017,6 +2288,7 @@ void doMpeMasterPitchbend(double pbUp, double pbDown, uint32_t deltaUsecs) {
 #define noteOnFirstFlag     (1 << 12) /* send note on before pressure */
 #define maxPressure126Flag  (1 << 13) /* limit max pressure to 126 */
 #define bendUpOnlyFlag      (1 << 14) /* don't bend down for pitch correction, only up */
+#define useETuningTableFlag (1 << 15) /* use Grey Matter E! tuning table format */ 
 
 struct MpeSettings {
   enum midiType midiType;
@@ -2044,6 +2316,7 @@ struct MpeSettings mpeSettingsSurgeXT = {mpe,          16, 48,  1000, 128, 0,  0
 struct MpeSettings mpeSettingsProteus = {multitimbral, 16,  2,  1000, 7,   0,  4,   4,  0,  7,   0,  useDinFlag | gmFlag | forcePbRangeFlag};
 struct MpeSettings mpeSettingsMox8    = {multitimbral, 16,  2,  1400, 7,   63, 63,  63, 0,  7,   0,  useDinFlag | gmFlag | forcePbRangeFlag | ccResetFlag};
 struct MpeSettings mpeSettingsPhatty  = {monovoice,    1,   2,  1000, 19,  0,  0,   0,  0,  0,   0,  useDinFlag | forcePbRangeFlag};
+struct MpeSettings mpeSettingsDx7E    = {tuningtable,  1,   1,  1000, 128, 0,  0,   0,  0,  0,   0,  useDinFlag | useETuningTableFlag | noPressureFlag};
 
 void sendMpeZones() {
   midiReadyWait();
@@ -2092,6 +2365,7 @@ void applyMpeSettings(struct MpeSettings *settings) {
   switch (settings->midiType) {
     case multitimbral:
     case monovoice:
+    case tuningtable:
       firstMpeChannel = 0;
       mpeChannels = settings->channels;
       doMsb = true;
@@ -2112,6 +2386,13 @@ void applyMpeSettings(struct MpeSettings *settings) {
 
   if ((settings->flags & ccResetFlag) != 0) {
     mpeCCReset();
+  }
+
+  tuningTableType = noTuningTable;
+
+  if ((settings->flags & useETuningTableFlag) != 0) {
+    tuningTableType = eTuningTable;
+    sendETuningTable();
   }
 
   currentMpeSettings = settings;
@@ -2155,7 +2436,7 @@ void mpeSetup() {
     struct MpeChannelState *state = &mpeState[channel];
     state->channel = channel;
     state->playing = false;
-    state->age = 0xffffffff;
+    state->age = 0x7fffffff;
     state->lastNote = 0;
     state->lastVolume = 128; /* deliberately out-of-range values here */
     state->lastPolyAT = 0;
@@ -2213,8 +2494,8 @@ void mpeUpdate(uint32_t deltaUsecs) {
   uint16_t channelMask = 0;
   for (int channel = firstMpeChannel; channel < firstMpeChannel + mpeChannels; channel++) {
     struct MpeChannelState *state = &mpeState[channel];
+    state->age += deltaUsecs;
     if (state->owner == noOne) {
-      state->age += deltaUsecs;
       if (state->playing) {
         continueMpeNote(state, 0.0f, deltaUsecs);
       }
@@ -2256,6 +2537,8 @@ void mpeUpdate(uint32_t deltaUsecs) {
     }
     channelMask |= 1 << channel;
   }
+
+  doMpeMasterPitchbend(pbUp, pbDown, deltaUsecs);
 
   /* process any changes to current active device preset */
   if (mpeSettings != nullptr && mpeSettings != currentMpeSettings) {
@@ -2343,22 +2626,6 @@ float forces[maxShiftRegisterBits][adcChannels] = {};
  */
 float allPathsCalibrationMatrix[adcChannels][adcChannels] = {};
 float calibrationMatrix[adcChannels][adcChannels] = {};
-
-void setLed(int led, int bit, int channel) {
-  int value = values[bit][channel];
-
-  int pressure = ((4096 - value) / 4)-25;
-  if (pressure <= 0)
-    pressure = 0;
-  else
-    pressure--;
-
-  if (pressure > 255) pressure = 255;
-
-  int color = (pressure << 16) | (pressure << 8) | pressure;
-
-  leds.setPixel(led, color);
-}
 
 float lerp(float a, float b, float c){
   float range = c-a;
@@ -2459,7 +2726,7 @@ struct Key {
   struct Pitch pitch;
   enum KeyState state;
   double intensity;
-  struct MpeChannelState *mpeState;
+  struct VoiceHandle voiceHandle;
   float lastPressure;
 };
 
@@ -2568,6 +2835,7 @@ struct Control {
   uint16_t maxPressure;
   uint32_t data;
   bool held;
+  float area = 1.0f;
 };
 
 enum SensorType {
@@ -2585,10 +2853,6 @@ void stealCallback(uint16_t owner) {
 void keyUpdate(struct Control* control, uint32_t deltaUsecs) {
   struct Key *key = control->key;
   float pressure = forces[control->bit][control->channel];
-
-  if (key->mpeState != nullptr) {
-    key->mpeState->age += deltaUsecs;
-  }
 
   float lastPressure = key->lastPressure;
   key->lastPressure = pressure;
@@ -2611,7 +2875,7 @@ void keyUpdate(struct Control* control, uint32_t deltaUsecs) {
   if (doMpeDynamicPressure || doMpePolyAfterTouch) {
     if (pressure > 0.01f) {
       if (pressure < 1.0f) {
-        intensity = pow(pressure - 0.01f, pressureExponent);
+        intensity = pow((pressure * 1.01f) - 0.01f, pressureExponent);
       }
     } else {
       intensity = 0.0f;
@@ -2622,8 +2886,8 @@ void keyUpdate(struct Control* control, uint32_t deltaUsecs) {
     switch (key->state) {
       case idle:
       case releasing:
-        key->mpeState = beginMpeNote((double)key->pitch.ratio.a / (double)key->pitch.ratio.b, key->index, velocity, intensity, stealCallback);
-        if (key->mpeState == nullptr) {
+        if (!beginNote(key->voiceHandle, (double)key->pitch.ratio.a / (double)key->pitch.ratio.b, velocity, intensity, key->index, stealCallback)) {
+          Serial.println("beginNote failed");
           return;
         }
         key->intensity = intensity;
@@ -2631,15 +2895,15 @@ void keyUpdate(struct Control* control, uint32_t deltaUsecs) {
         Serial.println("noteOn " + String(key->pitch.ratio.a) + "/" + String(key->pitch.ratio.b) + " v=" + String(velocity));
         break;
       case playing:
-        if (key->mpeState->owner != key->index) {
+        if (key->voiceHandle.stolen(key->index)) {
           key->state = idle;
-          key->mpeState = nullptr;
+          //key->mpeState = nullptr;
           break;
         }
         key->intensity = intensity;
-        if (!continueMpeNote(key->mpeState, intensity, deltaUsecs)) {
-          key->mpeState->owner = noOne;
-          key->mpeState = nullptr;
+        if (!continueNote(key->voiceHandle, intensity, deltaUsecs)) {
+          //key->mpeState->owner = noOne;
+          //key->mpeState = nullptr;
           key->state = releasing;
         }
         break;
@@ -2654,15 +2918,15 @@ void keyUpdate(struct Control* control, uint32_t deltaUsecs) {
       case playing:
         if (delayNoteOff && doMpeDynamicPressure) {
           key->intensity = intensity;
-          if (!continueMpeNote(key->mpeState, intensity, deltaUsecs)) {
-            key->mpeState->owner = noOne;
-            key->mpeState = nullptr;
+          if (!continueNote(key->voiceHandle, intensity, deltaUsecs)) {
+            //key->mpeState->owner = noOne;
+            //key->mpeState = nullptr;
             key->state = releasing;
           }
         } else {
-          if (endMpeNote(key->mpeState)) {
-            key->mpeState->owner = noOne;
-            key->mpeState = nullptr;
+          if (endNote(key->voiceHandle)) {
+            //key->mpeState->owner = noOne;
+            //key->mpeState = nullptr;
             key->state = releasing;
           } else {
             Serial.print("!");
@@ -2671,7 +2935,7 @@ void keyUpdate(struct Control* control, uint32_t deltaUsecs) {
         }
         break;
       case stolen:
-        key->mpeState = nullptr;
+        //key->mpeState = nullptr;
         key->state = idle;
         break;
     }
@@ -2679,24 +2943,21 @@ void keyUpdate(struct Control* control, uint32_t deltaUsecs) {
 }
 
 void pbUpUpdate(struct Control* control, uint32_t deltaUsecs) {
-  int value = values[control->bit][control->channel];
-  int pressure = (4095-value) - control->thresholdPressure;
-  if (pressure < 0) {
-    pressure = 0;
+  float force = forces[control->bit][control->channel];
+  if (force < 0.0f) {
+    force = 0.0f;
   }
   
-  pbUp = pow((double)pressure/(double)control->maxPressure, 1.0);
-  //doMpeMasterPitchbend(pbUp, pbDown, deltaUsecs/2);
+  pbUp = force;
 }
 
 void pbDownUpdate(struct Control* control, uint32_t deltaUsecs) {
-  int value = values[control->bit][control->channel];
-  int pressure = (4095-value) - control->thresholdPressure;
-  if (pressure < 0) {
-    pressure = 0;
+  float force = forces[control->bit][control->channel];
+  if (force < 0.0f) {
+    force = 0.0f;
   }
-  pbDown = pow((double)pressure/(double)control->maxPressure, 1.0);
-  doMpeMasterPitchbend(pbUp, pbDown, deltaUsecs);
+
+  pbDown = force;
 }
 
 bool debounce(struct Control* control, uint32_t deltaUsecs) {
@@ -2856,7 +3117,7 @@ void allNotesOffSlow() {
       while (!midiReady()) {
          delayMicroseconds(100);
       }
-      midiNoteOff(note, 63, channel+1);
+      midiNoteOffNoCount(note, 63, channel+1);
     }
   }
 
@@ -2906,7 +3167,7 @@ void statusTextUpdate() {
   String type;
   switch (midiType) {
     case (monotimbral):  type = "poly"; break;
-    case (mts):          type = "mts";  break;
+    case (tuningtable):  type = "tt";  break;
     case (multitimbral): type = "midi"; break;
     case (monovoice):    type = "mono"; break;
     case (mpe):          type = "mpe";  break;
@@ -2947,6 +3208,13 @@ void transposeUpdate(struct Control* control, uint32_t deltaUsecs, float transpo
       statusTextUpdate();
       setPitchReference(pitchReferenceHz());
       control->held = true;
+
+      /* re-generate and send the whole tuning table */
+      if (midiType == tuningtable) {
+        if (tuningTableType == eTuningTable) {
+          sendETuningTable(0);
+        }
+      }
     }
   }
   
@@ -3183,6 +3451,28 @@ void controlSetupController(uint16_t thresholdPressure, uint16_t maxPressure) {
     keyAllocIdx++; \
   }
 
+struct MidiTuningTableEntry keybedTuningTable[maxKeys];
+
+void keybedTuningTableSetup() {
+  int firstKey = middleC - (28 * 2);
+  //int lastKey = middleC + (28 * 2);
+
+  for (int i = 0; i < maxKeys; i++) {
+    struct MidiTuningTableEntry *tte = &keybedTuningTable[i];
+    struct Key *key = &keys[i];
+
+    tte->noteNumber = firstKey + i;
+    tte->channel = 0;
+    tte->pitch = (float)key->pitch.ratio.a / (float)key->pitch.ratio.b;
+    tte->users = 0;
+    tte->lastPressure = 128;
+    tte->pressureAge = 0x7fffffff;
+  }
+
+  midiTuningTable = keybedTuningTable;
+  midiTuningTableSize = maxKeys;
+}
+
 void controlSetupKeybed(uint16_t thresholdPressure, uint16_t maxPressure) {
   int oct = 0;
   CONTROL(resistor, 8, 0, "id0-10k");
@@ -3279,9 +3569,11 @@ void controlSetupKeybed(uint16_t thresholdPressure, uint16_t maxPressure) {
   controls[8+16+6][3].update = pbUpUpdate;
   controls[8+16+6][3].thresholdPressure = pbThresholdPressure;
   controls[8+16+6][3].maxPressure = pbMaxPressure;
+  controls[8+16+6][3].area = 4.0f;
   controls[8+16+7][3].update = pbDownUpdate;
   controls[8+16+7][3].thresholdPressure = pbThresholdPressure;
   controls[8+16+7][3].maxPressure = pbMaxPressure;
+  controls[8+16+7][3].area = 4.0f;
 }
 
 void allNotesOffSlowAction(void *data) {
@@ -3311,12 +3603,15 @@ void applyMpeSettingsAction(void *data) {
   applyMpeSettings(settings);
 }
 
+void sendETuningTableAction(void *data) {
+  sendETuningTable(0);
+}
+
 bool enableVisualizer = true;
 bool lastEnableVisualizer = enableVisualizer;
 bool debugShowResistances = true;
 bool debugShowCalibration = false;
 
-struct MenuItem allNotesOffFastMenuItem("notes off", action);
 struct MenuItem allNotesOffSlowMenuItem("notes off", allNotesOffSlowAction);
 struct MenuItem useUsbMenuItem("USB MIDI", toggle, &useUsbMidi);
 struct MenuItem useDinMenuItem("DIN5 MIDI", toggle, &useDinMidi);
@@ -3346,6 +3641,7 @@ struct MenuItem debugShowResistancesMenuItem("show res", toggle, &debugShowResis
 struct MenuItem debugShowCalibrationMenuItem("show cal", toggle, &debugShowCalibration);
 
 struct MenuItem unlockBankRangeMenuItem("unlock", toggle, &unlockBankRange);
+struct MenuItem sendETuningTableMenuItem("tx E! tt", sendETuningTableAction);
 
 uint32_t zero = 0;
 uint32_t maxMidiValue = 127;
@@ -3362,6 +3658,7 @@ struct MenuItem xv2020PresetMenuItem("XV-2020", selection, &mpeSettings, (uint32
 struct MenuItem sp300PresetMenuItem("SP-300", selection, &mpeSettings, (uint32_t)&mpeSettingsSP300);
 struct MenuItem trinityPresetMenuItem("Trinity", selection, &mpeSettings, (uint32_t)&mpeSettingsTrinity);
 struct MenuItem fb01PresetMenuItem("FB-01", selection, &mpeSettings, (uint32_t)&mpeSettingsFB01);
+struct MenuItem dx7EPresetMenuItem("DX7 with E!", selection, &mpeSettings, (uint32_t)&mpeSettingsDx7E);
 struct MenuItem moxPresetMenuItem("MOX6/8", selection, &mpeSettings, (uint32_t)&mpeSettingsMox8);
 struct MenuItem proteus2000PresetMenuItem("Proteus 2k", selection, &mpeSettings, (uint32_t)&mpeSettingsProteus);
 struct MenuItem phattyPresetMenuItem("Slim Phatty", selection, &mpeSettings, (uint32_t)&mpeSettingsPhatty);
@@ -3371,7 +3668,7 @@ struct MenuItem emuMenu("E-mu", submenu, &proteus2000PresetMenuItem);
 struct MenuItem korgMenu("Korg", submenu, &sp300PresetMenuItem, &trinityPresetMenuItem);
 struct MenuItem moogMenu("Moog", submenu, &phattyPresetMenuItem);
 struct MenuItem rolandMenu("Roland", submenu, &rd300PresetMenuItem, &xv2020PresetMenuItem);
-struct MenuItem yamahaMenu("Yamaha", submenu, &fb01PresetMenuItem, &moxPresetMenuItem);
+struct MenuItem yamahaMenu("Yamaha", submenu, &dx7EPresetMenuItem, &fb01PresetMenuItem, &moxPresetMenuItem);
 
 struct MenuItem* brandsMenu[] = {&arturiaMenu, &emuMenu, &korgMenu, &moogMenu, &rolandMenu, &surgeXtPresetMenuItem, &yamahaMenu};
 struct MenuItem outputPresetsMenu("dev presets", submenu, &brandsMenu[0], 7);
@@ -3554,6 +3851,7 @@ void setup() {
 
   controlSetupController(thresholdPressure, maxPressure);
   controlSetupKeybed(thresholdPressure, maxPressure);
+  keybedTuningTableSetup();
   delayMicroseconds(10000);
   Serial.println("end setup");
 }
@@ -3620,7 +3918,8 @@ void loop() {
     computeResistances(verboseAdc, values[curBit], calibrationMatrix, preCalibrationResistances[curBit], resistances[curBit], correctionIterations);
 
     for (int channel = 0; channel < adcChannels; channel++) {
-      forces[curBit][channel] = resistanceToForce(resistances[curBit][channel]);
+      float area = controls[curBit][channel].area;
+      forces[curBit][channel] = resistanceToForce(resistances[curBit][channel], area);
       if (enableVisualizer && (iteration+curBit) % 50 == 0) {
         float r = 0.0f, g = 0.0f, b = 0.0f;
 
@@ -3669,7 +3968,6 @@ void loop() {
 
   if (verbose  && debugShowResistances) {
     showResistances();
-    //showValues();
   }
 
   if (iteration % 16 == 0) { 
@@ -3735,8 +4033,7 @@ void loop() {
   }
 
   if (verbose) {
-    Serial.println(String("MIDI Sent: ") + midiMsgsSent + " received: " + midiMsgsReceived);
-    Serial.println("release rate" + String(releaseRate) + " pressure exponent " + String(pressureExponent));
+    Serial.println(String("MIDI Sent: ") + midiMsgsSent + " received: " + midiMsgsReceived + " release rate " + String(releaseRate) + " pressure exponent " + String(pressureExponent) + " pb +/- " + String(pbUp) + "  " + String(pbDown));
   }
   iteration++;
 }
