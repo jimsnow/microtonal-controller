@@ -19,6 +19,7 @@
 ! The numbers represent scale degrees mapped to keys. The first entry is for
 ! the given middle note, the next for subsequent higher keys.
 ! For an unmapped key, put in an "x". At the end, unmapped keys may be left out.
+0
 1
 2
 3
@@ -46,4 +47,3 @@
 25
 26
 27
-28
