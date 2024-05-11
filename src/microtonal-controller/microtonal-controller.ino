@@ -2317,6 +2317,7 @@ struct MpeSettings mpeSettingsProteus = {multitimbral, 16,  2,  1000, 7,   0,  4
 struct MpeSettings mpeSettingsMox8    = {multitimbral, 16,  2,  1400, 7,   63, 63,  63, 0,  7,   0,  useDinFlag | gmFlag | forcePbRangeFlag | ccResetFlag};
 struct MpeSettings mpeSettingsPhatty  = {monovoice,    1,   2,  1000, 19,  0,  0,   0,  0,  0,   0,  useDinFlag | forcePbRangeFlag};
 struct MpeSettings mpeSettingsDx7E    = {tuningtable,  1,   1,  1000, 128, 0,  0,   0,  0,  0,   0,  useDinFlag | useETuningTableFlag | noPressureFlag};
+struct MpeSettings mpeSettingsDexed   = {tuningtable,  1,   1,  1000, 128, 0,  0,   0,  0,  0,   0,  useUsbFlag | noPressureFlag }
 
 void sendMpeZones() {
   midiReadyWait();
@@ -3662,6 +3663,7 @@ struct MenuItem dx7EPresetMenuItem("DX7 with E!", selection, &mpeSettings, (uint
 struct MenuItem moxPresetMenuItem("MOX6/8", selection, &mpeSettings, (uint32_t)&mpeSettingsMox8);
 struct MenuItem proteus2000PresetMenuItem("Proteus 2k", selection, &mpeSettings, (uint32_t)&mpeSettingsProteus);
 struct MenuItem phattyPresetMenuItem("Slim Phatty", selection, &mpeSettings, (uint32_t)&mpeSettingsPhatty);
+struct MenuItem dexedPresetMenuItem("Dexed", selection, &MpeSettings, (uint32_t)&mpeSettingsDexed);
 
 struct MenuItem arturiaMenu("Arturia", submenu, &kspPresetMenuItem);
 struct MenuItem emuMenu("E-mu", submenu, &proteus2000PresetMenuItem);
@@ -3670,7 +3672,7 @@ struct MenuItem moogMenu("Moog", submenu, &phattyPresetMenuItem);
 struct MenuItem rolandMenu("Roland", submenu, &rd300PresetMenuItem, &xv2020PresetMenuItem);
 struct MenuItem yamahaMenu("Yamaha", submenu, &dx7EPresetMenuItem, &fb01PresetMenuItem, &moxPresetMenuItem);
 
-struct MenuItem* brandsMenu[] = {&arturiaMenu, &emuMenu, &korgMenu, &moogMenu, &rolandMenu, &surgeXtPresetMenuItem, &yamahaMenu};
+struct MenuItem* brandsMenu[] = {&arturiaMenu, &dexedPresetMenuItem, &emuMenu, &korgMenu, &moogMenu, &rolandMenu, &surgeXtPresetMenuItem, &yamahaMenu};
 struct MenuItem outputPresetsMenu("dev presets", submenu, &brandsMenu[0], 7);
 struct MenuItem pbRangeMenu("bend range", submenu, &pb2MenuItem, &pb7MenuItem, &pb12MenuItem, &pb24MenuItem, &pb48MenuItem);
 struct MenuItem noteOnFirstMenuItem("note-on 1st", toggle, &noteOnFirst);
