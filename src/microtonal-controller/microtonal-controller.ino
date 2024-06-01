@@ -720,8 +720,8 @@ void computeResistances(bool verbose, const int values[adcChannels], const float
   applyCalibration(verbose, calibrationMatrix, vAdc, resistances, iterations);
 }
 
-float zeroPressureResistance = 5000.0f;
-float maxPressureResistance = 600.0f;
+float zeroPressureResistance = 5500.0f;
+float maxPressureResistance = 800.0f;
 
 /*
  * Force can be outside range of 0 (minimum force) to 1 (maximum force)
@@ -1158,6 +1158,15 @@ struct MenuItem {
     return highlight;
   }
 
+  void addOption(struct MenuItem *item, int index) {
+    if (index < 0 || index > 2) {
+      return;
+    }
+
+    options[index] = item;
+  }
+
+
   String text;
   enum menuItemType type;
   void (*select)(void* data) = nullptr;
@@ -1170,6 +1179,7 @@ struct MenuItem {
   struct MenuItem* children[5];
   int scrollOffset = 0;
   bool highlight = false;
+  struct MenuItem* options[3] = {};
 };
 
 #define menuStackSize 10
@@ -1177,11 +1187,15 @@ struct MenuItem* menuStack[menuStackSize];
 uint16_t menuStackPos = 0; /* points to first unoccupied slot */
 
 struct MenuItem emptyMenuItem = MenuItem("", empty);
-struct MenuItem* menu[5] = {&emptyMenuItem, &emptyMenuItem, &emptyMenuItem, &emptyMenuItem, &emptyMenuItem};
+struct MenuItem* menu[9] = {&emptyMenuItem, &emptyMenuItem, &emptyMenuItem, &emptyMenuItem, &emptyMenuItem, &emptyMenuItem, &emptyMenuItem,  &emptyMenuItem, &emptyMenuItem};
 
 void statusTextUpdate();
 
 void menuSelect(struct MenuItem *item, uint16_t button) {
+  if (item == nullptr) {
+    return;
+  }
+
   if (item->type == submenu) {
     for (int i=0; i < 5; i++) {
       if (i + item->scrollOffset < item->numChildren) {
@@ -1195,6 +1209,19 @@ void menuSelect(struct MenuItem *item, uint16_t button) {
         menu[i] = &emptyMenuItem;
       }
       windows[i].redraw = true;
+    }
+
+    for (int i=0; i < 3; i++) {
+      if (item->options[i] != nullptr) {
+        windows[6+i].bgcolor = ILI9341_DARKGREY;
+        windows[6+i].text = item->options[i]->text;
+        windows[6+i].enabled = item->options[i]->type != empty;
+        menu[6+i] = item->options[i];
+      } else {
+        windows[6+i].enabled = false;
+        menu[6+i] = &emptyMenuItem;
+      }
+      windows[6+i].redraw = true;
     }
 
     windows[backText].enabled = menuStackPos > 0;
@@ -1212,9 +1239,10 @@ void menuSelect(struct MenuItem *item, uint16_t button) {
     moreDown = item->scrollOffset + 5 < item->numChildren; 
   }
 
-  if (item->type == toggle){
+  if (item->type == toggle) {
     if (item->data != nullptr) {
       *((bool*)(item->data)) = !*(bool*)(item->data);
+      Serial.println("toggled " + String(*((bool*)(item->data))));
     }
   }
 
@@ -1249,6 +1277,18 @@ void menuSelect(struct MenuItem *item, uint16_t button) {
       windows[i].highlight = child->checkHighlight();
       if (windows[i].highlight != prevHighlight) {
         windows[i].redraw = true;
+      }
+    }
+
+    for (int i = 0; i < 3; i++) {
+      auto option = parent->options[i];
+      if (option == nullptr) {
+        continue;
+      }
+      bool prevHighlight = option->highlight;
+      windows[6+i].highlight = option->checkHighlight();
+      if (windows[6+i].highlight != prevHighlight) {
+        windows[6+i].redraw = true;
       }
     }
   }
@@ -1310,12 +1350,12 @@ void menuPress(uint8_t button, uint16_t pressure, uint32_t deltaUsecs) {
 void menuRelease(uint8_t button, uint16_t pressure, uint32_t deltaUsecs) {
   windows[button].highlight = !windows[button].highlight;
   windows[button].redraw = true;
-  if (button <= menuText5) {
-    Serial.println("released button " + String(button));
-    menuSelect(menu[button], button);
-  } else if (button == backText) {
+  if (button == backText) {
     Serial.println("back button released");
     menuBack();
+  } else {
+    Serial.println("released button " + String(button));
+    menuSelect(menu[button], button);
   }
 }
 
@@ -1595,6 +1635,8 @@ bool doProgramChange = false;
 bool doMsb = false;
 bool doLsb = false;
 
+bool doCCPassThrough = true;
+
 void mpeMulticastCC(uint8_t cc, float value) {
   int v = (int)(value * 127.0f);
 
@@ -1723,7 +1765,7 @@ bool doMpeDynamicVelocity = true;
 bool doMpeDynamicPressure = true;
 bool doMpePolyAfterTouch = false;
 float mpeStaticVelocity = 0.75;
-float minVelocity = 0.2;
+//float minVelocity = 0.2;
 
 double transpose = 1.0;
 uint32_t mpeBankLsbMin = 0;
@@ -1757,6 +1799,9 @@ float pressureExponent = 0.8f;
 
 bool delayNoteOff = false;
 bool noteOnFirst = false;
+bool doFB01Setup = false;
+
+int minVelocity = 1; /* minimum MIDI note-on velocity, range: 1-127 */
 
 double pitchReferenceHz() {
   double c = 440.0 / (pow(pow(2, 1.0/12.0), 9));
@@ -1784,16 +1829,65 @@ int16_t calculatePitchBend(double pbUp, double pbDown, double pitch, double pbRa
   return pbi;
 }
 
-void prepareChannel(struct MpeChannelState *state) {
-  int channel = state->channel;
+void fb01SysEx1Byte(uint8_t channel, uint8_t param, uint8_t data) {
+  uint8_t system = 0;
+  uint8_t instrument = channel;
+
+  uint8_t buffer[8];
+  buffer[0] = 0xf0; // status
+  buffer[1] = 0x43; // Yamaha
+  buffer[2] = 0x75; // sub-status
+  buffer[3] = system & 0x0f; // which system
+  buffer[4] = instrument | 0x18; // which instrument
+  buffer[5] = param & 0x7f; // parameter
+  buffer[6] = data & 0x7f;  // 7 bit payload
+  buffer[7] = 0xf7; // end
 
   midiReadyWait();
+  midiSysEx(8, buffer);
+}
+
+void fb01SysEx2Byte(uint8_t channel, uint8_t param, uint8_t data) {
+  uint8_t system = 0;
+  uint8_t instrument = channel;
+
+  uint8_t buffer[9];
+  buffer[0] = 0xf0; // status
+  buffer[1] = 0x43; // Yamaha
+  buffer[2] = 0x75; // sub-status
+  buffer[3] = system & 0x0f;
+  buffer[4] = instrument | 0x18;
+  buffer[5] = param & 0x7f;
+  buffer[6] = data & 0x0f;
+  buffer[7] = (data >> 4) &0x0f; 
+  buffer[8] = 0xf7;
+
+  midiReadyWait();
+  midiSysEx(9, buffer);
+}
+
+void setPitchBendRange(int channel) {
+  midiReadyWait();
+
+  if (doFB01Setup) {
+    fb01SysEx1Byte(channel, 0x0c, pbRange); // set pitch bend
+    fb01SysEx1Byte(channel, 0x0a, 0);       // turn off lfo
+    fb01SysEx1Byte(channel, 0x06, 0);       // turn off detune
+    fb01SysEx2Byte(channel, 0x7b, 0x20 | (pbRange & 0x0f));  // set pitch bend control to pitch wheel, and set bend range 
+  } else {
+    midiRPN(0, 0, pbRange, channel + 1);
+  }
+}
+
+void prepareChannel(struct MpeChannelState *state) {
+  int channel = state->channel;
 
   /*
    * If we're updating the LSB, we have to send the MSB first
    * even if it hasn't changed. (On the XV-2020 at least.)
    */
   if (doMsb && (state->lastBankMsb != mpeBankMsb || state->lastBankLsb != mpeBankLsb)) {
+    midiReadyWait();
     midiControlChange(0, mpeBankMsb, channel + 1);
     state->lastBankMsb = mpeBankMsb;
     state->lastProgramChangeSent = 128;  /* force new program change to be sent */
@@ -1801,20 +1895,25 @@ void prepareChannel(struct MpeChannelState *state) {
   }
 
   if (doLsb && state->lastBankLsb != mpeBankLsb) {
-    midiControlChange(32, mpeBankLsb, channel + 1);
+    midiReadyWait();
+    if (doFB01Setup) {
+      fb01SysEx1Byte(state->channel, 0x04, mpeBankLsb);
+    } else {
+      midiControlChange(32, mpeBankLsb, channel + 1);
+    }
     state->lastBankLsb = mpeBankLsb;
     state->lastProgramChangeSent = 128; /* force new program change to be sent */
     Serial.println("sent lsb" + String(mpeBankLsb) + " channel " + String(channel));
   }
 
   if (doProgramChange && state->lastProgramChangeSent != programChange) {
+    midiReadyWait();
     midiProgramChange(programChange, channel + 1);
     state->lastProgramChangeSent = programChange;
 
     // set pitch bend range
     if (forcePbRange) {
-      midiReadyWait();
-      midiRPN(0, 0, pbRange, state->channel+1);
+      setPitchBendRange(state->channel);
     }
     Serial.println("sent program change " + String(programChange) + " channel " + String(channel));
   }
@@ -1827,8 +1926,8 @@ struct MpeChannelState *beginMpeNote(double pitch, double velocity, double press
   int v = (int) (1.0 + (velocity*126));
   if (v > 127) {
     v = 127;
-  } else if (v < 1) {
-    v = 1;
+  } else if (v < minVelocity) {
+    v = minVelocity;
   }
 
   double shift = pitchToCents(pitch * transpose);
@@ -2149,7 +2248,8 @@ bool endTuningTableNote(struct MidiTuningTableEntry* tte) {
 #define eTuningTableOffset(index, field) (7 + (index * 4) + field)
 
 /*
- * tuning table setup for the Grey Matter E! expansion board for Yamaha DX7
+ * Send tuning table for the Grey Matter E! expansion board for Yamaha DX7
+ * (midiTuningTable should already be initialized before calling this)
  */
 void sendETuningTable(uint8_t channel = 0) {
   uint8_t buffer[521];
@@ -2283,12 +2383,14 @@ bool endNote(struct VoiceHandle& voiceHandle) {
 #define forcePbRangeFlag    (1 << 7)  /* send MIDI commands to set pitch bend range explicitly */
 #define polyAfterTouchFlag  (1 << 8)  /* send poly aftertouch commands */
 #define ccResetFlag         (1 << 9)  /* reset a bunch of CCs to reasonable defaults */
-#define multicastTimbreFlag (1 << 10)
+#define multicastTimbreFlag (1 << 10) /* CCs sent to mpe multicast channel don't propagate to others, so do it manually */
 #define delayNoteOffFlag    (1 << 11) /* defer note-off according to pressure slew limiter */
 #define noteOnFirstFlag     (1 << 12) /* send note on before pressure */
 #define maxPressure126Flag  (1 << 13) /* limit max pressure to 126 */
 #define bendUpOnlyFlag      (1 << 14) /* don't bend down for pitch correction, only up */
 #define useETuningTableFlag (1 << 15) /* use Grey Matter E! tuning table format */ 
+#define doFB01SetupFlag     (1 << 16) /* FB01 has some specific sysex configuration */
+#define minVelocity16Flag   (1 << 17) /* set min velocity to 16 */
 
 struct MpeSettings {
   enum midiType midiType;
@@ -2307,17 +2409,17 @@ struct MpeSettings {
 
 struct MpeSettings mpeSettingsUsbMidi = {multitimbral, 16,  2,  1000, 7,   0,  127, 0,  0,  127, 0,  useUsbFlag | polyAfterTouchFlag};
 struct MpeSettings mpeSettingsXV2020  = {multitimbral, 16,  2, 15000, 7,   87, 87,  87, 64, 67,  64, useDinFlag | skipChannel10Flag | gmFlag | gm2Flag | noPressureFlag};
-struct MpeSettings mpeSettingsRD300NX = {multitimbral, 16,  2,  1000, 7,   84, 121, 84, 0,  127, 0,  useDinFlag | gmFlag};
-struct MpeSettings mpeSettingsFB01    = {multitimbral, 8,   2,  1000, 7,   0,  0,   0,  0,  0,   0,  useDinFlag};
+struct MpeSettings mpeSettingsRD300NX = {multitimbral, 16,  2,  1000, 7,   87, 121, 87, 0,  127, 0,  useDinFlag | gmFlag};
+struct MpeSettings mpeSettingsFB01    = {multitimbral, 8,   2,  1000, 7,   0,  0,   0,  0,  6,   0,  useDinFlag | doFB01SetupFlag | forcePbRangeFlag};
 struct MpeSettings mpeSettingsKSP     = {multitimbral, 4,  12,  1000, 1,   0,  0,   0,  0,  0,   0,  useDinFlag | bendUpOnlyFlag};
 struct MpeSettings mpeSettingsTrinity = {multitimbral, 16,  2,  1000, 7,   0,  0,   0,  0,  3,   0,  useDinFlag | forcePbRangeFlag | gmFlag};
-struct MpeSettings mpeSettingsSP300   = {multitimbral, 16,  2,  1000, 7,   0,  0,   0,  0,  0,   0,  useDinFlag};
-struct MpeSettings mpeSettingsSurgeXT = {mpe,          16, 48,  1000, 128, 0,  0,   0,  0,  0,   0,  useUsbFlag | multicastTimbreFlag | noteOnFirstFlag | maxPressure126Flag };
+struct MpeSettings mpeSettingsSP300   = {multitimbral, 16,  2,  1000, 7,   0,  0,   0,  0,  0,   0,  useDinFlag | skipChannel10Flag | minVelocity16Flag};
+struct MpeSettings mpeSettingsSurgeXT = {mpe,          16, 48,  1000, 128, 0,  0,   0,  0,  0,   0,  useUsbFlag | multicastTimbreFlag | maxPressure126Flag };
 struct MpeSettings mpeSettingsProteus = {multitimbral, 16,  2,  1000, 7,   0,  4,   4,  0,  7,   0,  useDinFlag | gmFlag | forcePbRangeFlag};
 struct MpeSettings mpeSettingsMox8    = {multitimbral, 16,  2,  1400, 7,   63, 63,  63, 0,  7,   0,  useDinFlag | gmFlag | forcePbRangeFlag | ccResetFlag};
 struct MpeSettings mpeSettingsPhatty  = {monovoice,    1,   2,  1000, 19,  0,  0,   0,  0,  0,   0,  useDinFlag | forcePbRangeFlag};
 struct MpeSettings mpeSettingsDx7E    = {tuningtable,  1,   1,  1000, 128, 0,  0,   0,  0,  0,   0,  useDinFlag | useETuningTableFlag | noPressureFlag};
-struct MpeSettings mpeSettingsDexed   = {tuningtable,  1,   1,  1000, 128, 0,  0,   0,  0,  0,   0,  useUsbFlag | noPressureFlag }
+struct MpeSettings mpeSettingsDexed   = {tuningtable,  1,   1,  1000, 128, 0,  0,   0,  0,  0,   0,  useUsbFlag | noPressureFlag };
 
 void sendMpeZones() {
   midiReadyWait();
@@ -2362,6 +2464,8 @@ void applyMpeSettings(struct MpeSettings *settings) {
   maxMpePressure = (settings->flags & maxPressure126Flag) != 0 ? 126 : 127;
   noteOnFirst = (settings->flags & maxPressure126Flag) != 0;
   bendUpOnly = (settings->flags & bendUpOnlyFlag) != 0;
+  doFB01Setup = (settings->flags & doFB01SetupFlag) != 0;
+  minVelocity = (settings->flags & minVelocity16Flag) != 0 ? 16 : 1;
 
   switch (settings->midiType) {
     case multitimbral:
@@ -2394,6 +2498,18 @@ void applyMpeSettings(struct MpeSettings *settings) {
   if ((settings->flags & useETuningTableFlag) != 0) {
     tuningTableType = eTuningTable;
     sendETuningTable();
+  }
+
+  if (doFB01Setup) {
+    for (int i = 0; i < 8; i++) {
+      fb01SysEx1Byte(i, 0x01, i);       // set instrument i to midi channel i
+      fb01SysEx1Byte(i, 0x00, 1);       // 1 voice per instrument
+      fb01SysEx1Byte(i, 0x06, 0);       // detune
+      fb01SysEx1Byte(i, 0x07, 2);       // octave transpose (range 0-4, with 2 as center)
+      fb01SysEx1Byte(i, 0x09, 64);      // pan middle
+      fb01SysEx1Byte(i, 0x0a, 0);       // disable LFo
+      fb01SysEx1Byte(i, 0x0c, pbRange); // pitchbend range
+    }
   }
 
   currentMpeSettings = settings;
@@ -2998,7 +3114,7 @@ void knobUpdate(struct Control* control, uint32_t deltaUsecs) {
   int knobIndex = control->data;
   struct Knob *knob = &knobs[knobIndex];
   float r = resistances[control->bit][control->channel];
-  float h = knob->hysteresis;
+  float h = (knob->hysteresis * 0.5f) + (knob->hysteresis * (r / knob->max) * 1.0f);  /* readings are less stable in the upper range */
   bool newval = false;
 
   switch (knob->state) {
@@ -3363,6 +3479,13 @@ void controlSetupController(uint16_t thresholdPressure, uint16_t maxPressure) {
 
   controls[1][0].update = menuButtonUpdate;
   controls[1][0].data = backText;
+  controls[2][0].update = menuButtonUpdate;
+  controls[2][0].data = fwdText;
+  controls[3][0].update = menuButtonUpdate;
+  controls[3][0].data = okText;
+  controls[4][0].update = menuButtonUpdate;
+  controls[4][0].data = cancelText;
+
   controls[6][0].update = editValueIncrementUpdate; // right
   controls[7][0].update = editValueDecrementUpdate; // left
 
@@ -3614,8 +3737,8 @@ bool debugShowResistances = true;
 bool debugShowCalibration = false;
 
 struct MenuItem allNotesOffSlowMenuItem("notes off", allNotesOffSlowAction);
-struct MenuItem useUsbMenuItem("USB MIDI", toggle, &useUsbMidi);
-struct MenuItem useDinMenuItem("DIN5 MIDI", toggle, &useDinMidi);
+struct MenuItem useUsbMenuItem("usb midi", toggle, &useUsbMidi);
+struct MenuItem useDinMenuItem("din5 midi", toggle, &useDinMidi);
 struct MenuItem screen10MenuItem("10%", selection, &brightness, 25);
 struct MenuItem screen25MenuItem("25%", selection, &brightness, 63);
 struct MenuItem screen50MenuItem("50%", selection, &brightness, 127);
@@ -3632,6 +3755,8 @@ struct MenuItem mpeHandshakeMenuItem("mpe init", mpeHandshakeAction);
 
 struct MenuItem doVelocityMenuItem("velocity", toggle, &doMpeDynamicVelocity);
 struct MenuItem doPressureMenuItem("pressure", toggle, &doMpeDynamicPressure);
+struct MenuItem doVelocityMenuItemTerse("vel", toggle, &doMpeDynamicVelocity);
+struct MenuItem doPressureMenuItemTerse("pre", toggle, &doMpeDynamicPressure);
 struct MenuItem doPolyAfterTouchMenuItem("poly at", toggle, &doMpePolyAfterTouch);
 struct MenuItem pressureBackoffMenuItem("p backoff", value, &pressureBackoff);
 
@@ -3644,13 +3769,17 @@ struct MenuItem debugShowCalibrationMenuItem("show cal", toggle, &debugShowCalib
 struct MenuItem unlockBankRangeMenuItem("unlock", toggle, &unlockBankRange);
 struct MenuItem sendETuningTableMenuItem("tx E! tt", sendETuningTableAction);
 
+struct MenuItem doCCPassThroughMenuItem("CC thru", toggle, &doCCPassThrough);
+
 uint32_t zero = 0;
+uint32_t one = 1;
 uint32_t maxMidiValue = 127;
 uint32_t maxChannels = 16;
 
 struct MenuItem pressureCCMenuItem("pressure CC", value, &pressureCC, &zero, &maxMidiValue);
 struct MenuItem mpeProgramChangeMenuItem("patch", value, &programChange, &zero, &maxMidiValue);
 struct MenuItem mpeChannelsMenuItem("channels", value, &mpeChannels, &zero, &maxChannels);
+struct MenuItem minVelocityMenuItem("min vel", value, &minVelocity, &one, &maxMidiValue);
 
 struct MenuItem surgeXtPresetMenuItem("Surge XT", selection, &mpeSettings, (uint32_t)&mpeSettingsSurgeXT);
 struct MenuItem kspPresetMenuItem("Keystep Pro", selection, &mpeSettings, (uint32_t)&mpeSettingsKSP);
@@ -3663,7 +3792,7 @@ struct MenuItem dx7EPresetMenuItem("DX7 with E!", selection, &mpeSettings, (uint
 struct MenuItem moxPresetMenuItem("MOX6/8", selection, &mpeSettings, (uint32_t)&mpeSettingsMox8);
 struct MenuItem proteus2000PresetMenuItem("Proteus 2k", selection, &mpeSettings, (uint32_t)&mpeSettingsProteus);
 struct MenuItem phattyPresetMenuItem("Slim Phatty", selection, &mpeSettings, (uint32_t)&mpeSettingsPhatty);
-struct MenuItem dexedPresetMenuItem("Dexed", selection, &MpeSettings, (uint32_t)&mpeSettingsDexed);
+struct MenuItem dexedPresetMenuItem("Dexed", selection, &mpeSettings, (uint32_t)&mpeSettingsDexed);
 
 struct MenuItem arturiaMenu("Arturia", submenu, &kspPresetMenuItem);
 struct MenuItem emuMenu("E-mu", submenu, &proteus2000PresetMenuItem);
@@ -3673,13 +3802,13 @@ struct MenuItem rolandMenu("Roland", submenu, &rd300PresetMenuItem, &xv2020Prese
 struct MenuItem yamahaMenu("Yamaha", submenu, &dx7EPresetMenuItem, &fb01PresetMenuItem, &moxPresetMenuItem);
 
 struct MenuItem* brandsMenu[] = {&arturiaMenu, &dexedPresetMenuItem, &emuMenu, &korgMenu, &moogMenu, &rolandMenu, &surgeXtPresetMenuItem, &yamahaMenu};
-struct MenuItem outputPresetsMenu("dev presets", submenu, &brandsMenu[0], 7);
+struct MenuItem outputPresetsMenu("dev presets", submenu, &brandsMenu[0], 8);
 struct MenuItem pbRangeMenu("bend range", submenu, &pb2MenuItem, &pb7MenuItem, &pb12MenuItem, &pb24MenuItem, &pb48MenuItem);
 struct MenuItem noteOnFirstMenuItem("note-on 1st", toggle, &noteOnFirst);
 struct MenuItem maxPressureMenuItem("max p", value, &maxMpePressure, &zero, &maxMidiValue);
 
-struct MenuItem* outputMenuItems[] = {&useUsbMenuItem, &useDinMenuItem, &outputPresetsMenu, &mpeHandshakeMenuItem, &mpeChannelsMenuItem, &pbRangeMenu, &pressureCCMenuItem, &noteOnFirstMenuItem, &maxPressureMenuItem};
-struct MenuItem outputMenu("output", submenu, &outputMenuItems[0], 9);
+struct MenuItem* outputMenuItems[] = {&useUsbMenuItem, &useDinMenuItem, &outputPresetsMenu, &mpeHandshakeMenuItem, &mpeChannelsMenuItem, &pbRangeMenu, &pressureCCMenuItem, &maxPressureMenuItem, &minVelocityMenuItem, &doCCPassThroughMenuItem};
+struct MenuItem outputMenu("output", submenu, &outputMenuItems[0], 10);
 
 struct MenuItem controlsMenu("controls", submenu, &doVelocityMenuItem, &doPressureMenuItem, &doPolyAfterTouchMenuItem, &pressureBackoffMenuItem);
 
@@ -3688,7 +3817,7 @@ struct MenuItem screenBrightnessMenu("brightness", submenu, &screen10MenuItem, &
 struct MenuItem interfaceMenu("interface", submenu, &screenBrightnessMenu, &visualizerMenuItem);
 struct MenuItem patchesMenu("patches", submenu, &mpeBankMsbMenuItem,  &mpeBankLsbMenuItem, &mpeProgramChangeMenuItem, &unlockBankRangeMenuItem);
 
-struct MenuItem debugMenu("debug", submenu, &debugShowResistancesMenuItem, &debugShowCalibrationMenuItem);
+struct MenuItem debugMenu("debug", submenu, &debugShowResistancesMenuItem, &debugShowCalibrationMenuItem, &noteOnFirstMenuItem);
 
 struct MenuItem configMenu("settings", submenu, &outputMenu, &controlsMenu, &interfaceMenu, &debugMenu);
 
@@ -3696,6 +3825,9 @@ struct MenuItem rootMenu("", submenu, &configMenu, &patchesMenu, &emptyMenuItem,
 
 void menuSetup() {
   menuSelect(&rootMenu, 0);
+
+  patchesMenu.addOption(&doVelocityMenuItemTerse, 0);
+  patchesMenu.addOption(&doPressureMenuItemTerse, 2);
 }
 
 void printWidth12(const char* str) {
@@ -4007,6 +4139,9 @@ void loop() {
         cc = dinMidi.getData1();
         data = dinMidi.getData2();
         Serial.println(String("got CC ") + cc + " data " + data);
+        if (doCCPassThrough) {
+          mpeMulticastCC(cc, data);
+        }
         break;
       default:
         Serial.print("midi message type ");
