@@ -1,6 +1,6 @@
 /**@file microtonal-controller.ino */
 /*
-Copyright 2023 Jim Snow
+Copyright 2023-2024 Jim Snow
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -1725,6 +1725,7 @@ uint32_t pbRange = 2;  // could use float, but int is more compatible with MIDI 
 uint32_t pressureCC = 128;
 uint32_t pressureCCSet = pressureCC;
 uint32_t maxMpePressure = 127;
+uint32_t minMpePressure = 0;
 
 /* seconds from full to none, or vice versa */
 double attack = 0.0;
@@ -1919,7 +1920,8 @@ void prepareChannel(struct MpeChannelState *state) {
   }
 }
 
-bool bendUpOnly = false;
+int bendUpOnly = false;
+int bendDownOnly = false;
 
 struct MpeChannelState *beginMpeNote(double pitch, double velocity, double pressure, uint16_t owner, void stealCallback(uint16_t)) {
 
@@ -1946,7 +1948,11 @@ struct MpeChannelState *beginMpeNote(double pitch, double velocity, double press
   if (bendUpOnly && cents < 0.0f) {
     semitones--;
     cents += 100.0f;
+  }
 
+  if (bendDownOnly && cents > 0.0f) {
+    semitones++;
+    cents -= 100.0f;
   }
 
   int note = middleC + semitones;
@@ -2041,7 +2047,7 @@ bool continueMpeNote(struct MpeChannelState *state, double pressure, uint32_t de
 
   int max = maxMpePressure;
 
-  uint16_t volume = doMpeDynamicPressure ? pressure * (float)max : max;
+  uint16_t volume = doMpeDynamicPressure ? minMpePressure + (pressure * (float)(maxMpePressure - minMpePressure)) : max;
   if (volume > max) {
     volume = max;
   }
@@ -2388,9 +2394,10 @@ bool endNote(struct VoiceHandle& voiceHandle) {
 #define noteOnFirstFlag     (1 << 12) /* send note on before pressure */
 #define maxPressure126Flag  (1 << 13) /* limit max pressure to 126 */
 #define bendUpOnlyFlag      (1 << 14) /* don't bend down for pitch correction, only up */
-#define useETuningTableFlag (1 << 15) /* use Grey Matter E! tuning table format */ 
-#define doFB01SetupFlag     (1 << 16) /* FB01 has some specific sysex configuration */
-#define minVelocity16Flag   (1 << 17) /* set min velocity to 16 */
+#define bendDownOnlyFlag    (1 << 15) /* don't bend up for pitch correction, only down */
+#define useETuningTableFlag (1 << 16) /* use Grey Matter E! tuning table format */ 
+#define doFB01SetupFlag     (1 << 17) /* FB01 has some specific sysex configuration */
+#define minVelocity16Flag   (1 << 18) /* set min velocity to 16 */
 
 struct MpeSettings {
   enum midiType midiType;
@@ -2411,7 +2418,7 @@ struct MpeSettings mpeSettingsUsbMidi = {multitimbral, 16,  2,  1000, 7,   0,  1
 struct MpeSettings mpeSettingsXV2020  = {multitimbral, 16,  2, 15000, 7,   87, 87,  87, 64, 67,  64, useDinFlag | skipChannel10Flag | gmFlag | gm2Flag | noPressureFlag};
 struct MpeSettings mpeSettingsRD300NX = {multitimbral, 16,  2,  1000, 7,   87, 121, 87, 0,  127, 0,  useDinFlag | gmFlag};
 struct MpeSettings mpeSettingsFB01    = {multitimbral, 8,   2,  1000, 7,   0,  0,   0,  0,  6,   0,  useDinFlag | doFB01SetupFlag | forcePbRangeFlag};
-struct MpeSettings mpeSettingsKSP     = {multitimbral, 4,  12,  1000, 1,   0,  0,   0,  0,  0,   0,  useDinFlag | bendUpOnlyFlag};
+struct MpeSettings mpeSettingsKSP     = {multitimbral, 4,   2,  1000, 1,   0,  0,   0,  0,  0,   0,  useDinFlag};
 struct MpeSettings mpeSettingsTrinity = {multitimbral, 16,  2,  1000, 7,   0,  0,   0,  0,  3,   0,  useDinFlag | forcePbRangeFlag | gmFlag};
 struct MpeSettings mpeSettingsSP300   = {multitimbral, 16,  2,  1000, 7,   0,  0,   0,  0,  0,   0,  useDinFlag | skipChannel10Flag | minVelocity16Flag};
 struct MpeSettings mpeSettingsSurgeXT = {mpe,          16, 48,  1000, 128, 0,  0,   0,  0,  0,   0,  useUsbFlag | multicastTimbreFlag | maxPressure126Flag };
@@ -2462,8 +2469,9 @@ void applyMpeSettings(struct MpeSettings *settings) {
   forcePbRange = (settings->flags & forcePbRangeFlag) != 0;
   delayNoteOff = (settings->flags & delayNoteOffFlag) != 0;
   maxMpePressure = (settings->flags & maxPressure126Flag) != 0 ? 126 : 127;
-  noteOnFirst = (settings->flags & maxPressure126Flag) != 0;
+  noteOnFirst = (settings->flags & noteOnFirstFlag) != 0;
   bendUpOnly = (settings->flags & bendUpOnlyFlag) != 0;
+  bendDownOnly = (settings->flags & bendDownOnlyFlag) != 0;
   doFB01Setup = (settings->flags & doFB01SetupFlag) != 0;
   minVelocity = (settings->flags & minVelocity16Flag) != 0 ? 16 : 1;
 
@@ -2861,7 +2869,7 @@ struct Knob {
 
   float valueUpperBound = 100.0;
   float valueLowerBound = 0.0;
-  float hysteresis = 500.0;
+  float hysteresis = 600.0;
   float current;
   uint32_t data = 0;
   float initial = 0.0f;
@@ -3759,6 +3767,8 @@ struct MenuItem doVelocityMenuItemTerse("vel", toggle, &doMpeDynamicVelocity);
 struct MenuItem doPressureMenuItemTerse("pre", toggle, &doMpeDynamicPressure);
 struct MenuItem doPolyAfterTouchMenuItem("poly at", toggle, &doMpePolyAfterTouch);
 struct MenuItem pressureBackoffMenuItem("p backoff", value, &pressureBackoff);
+struct MenuItem bendUpOnlyMenuItem("only bend up", toggle, &bendUpOnly);
+struct MenuItem bendDownOnlyMenuItem("only bend dn", toggle, &bendDownOnly);
 
 struct MenuItem mpeBankLsbMenuItem("bank LSB", value, &mpeBankLsb, &mpeBankLsbMin, &mpeBankLsbMax);
 struct MenuItem mpeBankMsbMenuItem("bank MSB", value, &mpeBankMsb, &mpeBankMsbMin, &mpeBankMsbMax);
@@ -3806,9 +3816,10 @@ struct MenuItem outputPresetsMenu("dev presets", submenu, &brandsMenu[0], 8);
 struct MenuItem pbRangeMenu("bend range", submenu, &pb2MenuItem, &pb7MenuItem, &pb12MenuItem, &pb24MenuItem, &pb48MenuItem);
 struct MenuItem noteOnFirstMenuItem("note-on 1st", toggle, &noteOnFirst);
 struct MenuItem maxPressureMenuItem("max p", value, &maxMpePressure, &zero, &maxMidiValue);
+struct MenuItem minPressureMenuItem("min p", value, &minMpePressure, &zero, &maxMidiValue);
 
-struct MenuItem* outputMenuItems[] = {&useUsbMenuItem, &useDinMenuItem, &outputPresetsMenu, &mpeHandshakeMenuItem, &mpeChannelsMenuItem, &pbRangeMenu, &pressureCCMenuItem, &maxPressureMenuItem, &minVelocityMenuItem, &doCCPassThroughMenuItem};
-struct MenuItem outputMenu("output", submenu, &outputMenuItems[0], 10);
+struct MenuItem* outputMenuItems[] = {&useUsbMenuItem, &useDinMenuItem, &outputPresetsMenu, &mpeHandshakeMenuItem, &mpeChannelsMenuItem, &pbRangeMenu, &pressureCCMenuItem, &maxPressureMenuItem, &minPressureMenuItem, &minVelocityMenuItem, &doCCPassThroughMenuItem};
+struct MenuItem outputMenu("output", submenu, &outputMenuItems[0], 11);
 
 struct MenuItem controlsMenu("controls", submenu, &doVelocityMenuItem, &doPressureMenuItem, &doPolyAfterTouchMenuItem, &pressureBackoffMenuItem);
 
@@ -3817,7 +3828,8 @@ struct MenuItem screenBrightnessMenu("brightness", submenu, &screen10MenuItem, &
 struct MenuItem interfaceMenu("interface", submenu, &screenBrightnessMenu, &visualizerMenuItem);
 struct MenuItem patchesMenu("patches", submenu, &mpeBankMsbMenuItem,  &mpeBankLsbMenuItem, &mpeProgramChangeMenuItem, &unlockBankRangeMenuItem);
 
-struct MenuItem debugMenu("debug", submenu, &debugShowResistancesMenuItem, &debugShowCalibrationMenuItem, &noteOnFirstMenuItem);
+struct MenuItem* debugMenuItems[] = {&debugShowResistancesMenuItem, &debugShowCalibrationMenuItem, &noteOnFirstMenuItem, &bendUpOnlyMenuItem, &bendDownOnlyMenuItem};
+struct MenuItem debugMenu("debug", submenu, &debugMenuItems[0], 5);
 
 struct MenuItem configMenu("settings", submenu, &outputMenu, &controlsMenu, &interfaceMenu, &debugMenu);
 
