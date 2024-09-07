@@ -2398,6 +2398,19 @@ bool endNote(struct VoiceHandle& voiceHandle) {
 #define useETuningTableFlag (1 << 16) /* use Grey Matter E! tuning table format */ 
 #define doFB01SetupFlag     (1 << 17) /* FB01 has some specific sysex configuration */
 #define minVelocity16Flag   (1 << 18) /* set min velocity to 16 */
+#define minVelocity32Flag   (1 << 19) /* set min velocity to 32 */
+#define minPressure32Flag   (1 << 20) /* set min pressure to 32 */
+
+struct MpeBank {
+  uint8_t lsb;
+  uint8_t msb;
+  String desc;
+};
+
+struct MpeBankMap {
+  uint8_t bankLength;
+  struct MpeBank* banks;
+};
 
 struct MpeSettings {
   enum midiType midiType;
@@ -2411,22 +2424,26 @@ struct MpeSettings {
   uint8_t bankLsbMin;
   uint8_t bankLsbMax;
   uint8_t defaultLsb;
+  struct MpeBankMap *bankMap;
   uint32_t flags;
 };
 
-struct MpeSettings mpeSettingsUsbMidi = {multitimbral, 16,  2,  1000, 7,   0,  127, 0,  0,  127, 0,  useUsbFlag | polyAfterTouchFlag};
-struct MpeSettings mpeSettingsXV2020  = {multitimbral, 16,  2, 15000, 7,   87, 87,  87, 64, 67,  64, useDinFlag | skipChannel10Flag | gmFlag | gm2Flag | noPressureFlag};
-struct MpeSettings mpeSettingsRD300NX = {multitimbral, 16,  2,  1000, 7,   87, 121, 87, 0,  127, 0,  useDinFlag | gmFlag};
-struct MpeSettings mpeSettingsFB01    = {multitimbral, 8,   2,  1000, 7,   0,  0,   0,  0,  6,   0,  useDinFlag | doFB01SetupFlag | forcePbRangeFlag};
-struct MpeSettings mpeSettingsKSP     = {multitimbral, 4,   2,  1000, 1,   0,  0,   0,  0,  0,   0,  useDinFlag};
-struct MpeSettings mpeSettingsTrinity = {multitimbral, 16,  2,  1000, 7,   0,  0,   0,  0,  3,   0,  useDinFlag | forcePbRangeFlag | gmFlag};
-struct MpeSettings mpeSettingsSP300   = {multitimbral, 16,  2,  1000, 7,   0,  0,   0,  0,  0,   0,  useDinFlag | skipChannel10Flag | minVelocity16Flag};
-struct MpeSettings mpeSettingsSurgeXT = {mpe,          16, 48,  1000, 128, 0,  0,   0,  0,  0,   0,  useUsbFlag | multicastTimbreFlag | maxPressure126Flag };
-struct MpeSettings mpeSettingsProteus = {multitimbral, 16,  2,  1000, 7,   0,  4,   4,  0,  7,   0,  useDinFlag | gmFlag | forcePbRangeFlag};
-struct MpeSettings mpeSettingsMox8    = {multitimbral, 16,  2,  1400, 7,   63, 63,  63, 0,  7,   0,  useDinFlag | gmFlag | forcePbRangeFlag | ccResetFlag};
-struct MpeSettings mpeSettingsPhatty  = {monovoice,    1,   2,  1000, 19,  0,  0,   0,  0,  0,   0,  useDinFlag | forcePbRangeFlag};
-struct MpeSettings mpeSettingsDx7E    = {tuningtable,  1,   1,  1000, 128, 0,  0,   0,  0,  0,   0,  useDinFlag | useETuningTableFlag | noPressureFlag};
-struct MpeSettings mpeSettingsDexed   = {tuningtable,  1,   1,  1000, 128, 0,  0,   0,  0,  0,   0,  useUsbFlag | noPressureFlag };
+struct MpeSettings mpeSettingsUsbMidi = {multitimbral, 16,  2,  1000, 7,   0,  127, 0,  0,  127, 0,  nullptr, useUsbFlag | polyAfterTouchFlag};
+struct MpeSettings mpeSettingsXV2020  = {multitimbral, 16,  2, 15000, 7,   87, 87,  87, 64, 67,  64, nullptr, useDinFlag | skipChannel10Flag | gmFlag | gm2Flag | noPressureFlag};
+struct MpeSettings mpeSettingsRD300NX = {multitimbral, 16,  2,  1000, 7,   87, 121, 87, 0,  127, 0,  nullptr, useDinFlag | gmFlag};
+struct MpeSettings mpeSettingsFB01    = {multitimbral, 8,   2,  1000, 7,   0,  0,   0,  0,  6,   0,  nullptr, useDinFlag | doFB01SetupFlag | forcePbRangeFlag};
+struct MpeSettings mpeSettingsKSP     = {multitimbral, 4,   2,  1000, 1,   0,  0,   0,  0,  0,   0,  nullptr, useDinFlag};
+struct MpeSettings mpeSettingsTrinity = {multitimbral, 16,  2,  1000, 7,   0,  0,   0,  0,  3,   0,  nullptr, useDinFlag | forcePbRangeFlag | gmFlag};
+struct MpeSettings mpeSettingsX50     = {multitimbral, 16,  2,  1000, 7,   0,  0,   0,  0,  3,   0,  nullptr, useDinFlag | forcePbRangeFlag | gmFlag};
+struct MpeSettings mpeSettingsSP300   = {multitimbral, 16,  2,  1000, 7,   0,  0,   0,  0,  0,   0,  nullptr, useDinFlag | skipChannel10Flag | minVelocity16Flag};
+struct MpeSettings mpeSettingsSurgeXT = {mpe,          16, 48,  1000, 128, 0,  0,   0,  0,  0,   0,  nullptr, useUsbFlag | multicastTimbreFlag | maxPressure126Flag };
+struct MpeSettings mpeSettingsProteus = {multitimbral, 16,  2,  1000, 7,   0,  4,   4,  0,  7,   0,  nullptr, useDinFlag | gmFlag | forcePbRangeFlag | minVelocity32Flag | minPressure32Flag};
+struct MpeSettings mpeSettingsMox8    = {multitimbral, 16,  2,  1400, 7,   63, 63,  63, 0,  7,   0,  nullptr, useDinFlag | gmFlag | forcePbRangeFlag | ccResetFlag};
+struct MpeSettings mpeSettingsPhatty  = {monovoice,    1,   2,  1000, 19,  0,  0,   0,  0,  0,   0,  nullptr, useDinFlag | forcePbRangeFlag};
+struct MpeSettings mpeSettingsDx7E    = {tuningtable,  1,   1,  1000, 128, 0,  0,   0,  0,  0,   0,  nullptr, useDinFlag | useETuningTableFlag | noPressureFlag};
+struct MpeSettings mpeSettingsDexed   = {tuningtable,  1,   1,  1000, 128, 0,  0,   0,  0,  0,   0,  nullptr, useUsbFlag | noPressureFlag };
+struct MpeSettings mpeSettingsQSynth  = {multitimbral, 16,  2,  1000, 11,  0,  0,   0,  0,  0,   0,  nullptr, useUsbFlag | skipChannel10Flag | minVelocity32Flag};
+
 
 void sendMpeZones() {
   midiReadyWait();
@@ -2473,7 +2490,11 @@ void applyMpeSettings(struct MpeSettings *settings) {
   bendUpOnly = (settings->flags & bendUpOnlyFlag) != 0;
   bendDownOnly = (settings->flags & bendDownOnlyFlag) != 0;
   doFB01Setup = (settings->flags & doFB01SetupFlag) != 0;
-  minVelocity = (settings->flags & minVelocity16Flag) != 0 ? 16 : 1;
+  minVelocity = (settings->flags & minVelocity16Flag) != 0
+    ? 16
+    : (settings->flags & minVelocity32Flag) != 0 ? 32 : 1;
+  minMpePressure = (settings->flags & minPressure32Flag) != 0 ? 32 : 0;
+
 
   switch (settings->midiType) {
     case multitimbral:
@@ -3797,22 +3818,24 @@ struct MenuItem rd300PresetMenuItem("RD-300NX", selection, &mpeSettings, (uint32
 struct MenuItem xv2020PresetMenuItem("XV-2020", selection, &mpeSettings, (uint32_t)&mpeSettingsXV2020);
 struct MenuItem sp300PresetMenuItem("SP-300", selection, &mpeSettings, (uint32_t)&mpeSettingsSP300);
 struct MenuItem trinityPresetMenuItem("Trinity", selection, &mpeSettings, (uint32_t)&mpeSettingsTrinity);
+struct MenuItem x50PresetMenuItem("X50", selection, &mpeSettings, (uint32_t)&mpeSettingsX50);
 struct MenuItem fb01PresetMenuItem("FB-01", selection, &mpeSettings, (uint32_t)&mpeSettingsFB01);
 struct MenuItem dx7EPresetMenuItem("DX7 with E!", selection, &mpeSettings, (uint32_t)&mpeSettingsDx7E);
 struct MenuItem moxPresetMenuItem("MOX6/8", selection, &mpeSettings, (uint32_t)&mpeSettingsMox8);
 struct MenuItem proteus2000PresetMenuItem("Proteus 2k", selection, &mpeSettings, (uint32_t)&mpeSettingsProteus);
 struct MenuItem phattyPresetMenuItem("Slim Phatty", selection, &mpeSettings, (uint32_t)&mpeSettingsPhatty);
 struct MenuItem dexedPresetMenuItem("Dexed", selection, &mpeSettings, (uint32_t)&mpeSettingsDexed);
+struct MenuItem qSynthPresetMenuItem("QSynth", selection, &mpeSettings, (uint32_t)&mpeSettingsQSynth);
 
 struct MenuItem arturiaMenu("Arturia", submenu, &kspPresetMenuItem);
 struct MenuItem emuMenu("E-mu", submenu, &proteus2000PresetMenuItem);
-struct MenuItem korgMenu("Korg", submenu, &sp300PresetMenuItem, &trinityPresetMenuItem);
+struct MenuItem korgMenu("Korg", submenu, &sp300PresetMenuItem, &trinityPresetMenuItem, &x50PresetMenuItem);
 struct MenuItem moogMenu("Moog", submenu, &phattyPresetMenuItem);
 struct MenuItem rolandMenu("Roland", submenu, &rd300PresetMenuItem, &xv2020PresetMenuItem);
 struct MenuItem yamahaMenu("Yamaha", submenu, &dx7EPresetMenuItem, &fb01PresetMenuItem, &moxPresetMenuItem);
 
-struct MenuItem* brandsMenu[] = {&arturiaMenu, &dexedPresetMenuItem, &emuMenu, &korgMenu, &moogMenu, &rolandMenu, &surgeXtPresetMenuItem, &yamahaMenu};
-struct MenuItem outputPresetsMenu("dev presets", submenu, &brandsMenu[0], 8);
+struct MenuItem* brandsMenu[] = {&arturiaMenu, &dexedPresetMenuItem, &emuMenu, &korgMenu, &moogMenu, &rolandMenu, &surgeXtPresetMenuItem, &qSynthPresetMenuItem, &yamahaMenu};
+struct MenuItem outputPresetsMenu("dev presets", submenu, &brandsMenu[0], 9);
 struct MenuItem pbRangeMenu("bend range", submenu, &pb2MenuItem, &pb7MenuItem, &pb12MenuItem, &pb24MenuItem, &pb48MenuItem);
 struct MenuItem noteOnFirstMenuItem("note-on 1st", toggle, &noteOnFirst);
 struct MenuItem maxPressureMenuItem("max p", value, &maxMpePressure, &zero, &maxMidiValue);
