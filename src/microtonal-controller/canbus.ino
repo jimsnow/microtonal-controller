@@ -1,4 +1,3 @@
-
 /*
 Copyright 2023-2025 Jim Snow, Desiderata Systems LLC
 
@@ -17,22 +16,33 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 */
 
-// To give your project a unique name, this code must be
-// placed into a .c file (its own tab).  It can not be in
-// a .cpp file or your main sketch (the .ino file).
 
-#include "usb_names.h"
+FlexCAN_T4<CAN1, RX_SIZE_256, TX_SIZE_16> can;
 
-// Edit these lines to create your own name.  The length must
-// match the number of characters in your custom name.
+void canSetup() {
+  can.begin();
+  can.setBaudRate(1000000);
+}
 
-#define MIDI_NAME   {'S', 'e', 'v', 'e', 'n', ' ', 'L', 'i', 'm', 'i', 't', ' ', 'M','o','s','a','i','c','h', 'o', 'r', 'd'}
-#define MIDI_NAME_LEN  22
+void canUpdate() {
+  CAN_message_t msg;
+  if (can.read(msg)){
+    Serial.print("can message received ID 0x");
+    Serial.print(msg.id, HEX);
+    Serial.print(" data ");
+    for (int i = 0; i < 8; i++) {
+      Serial.print(msg.buf[i], HEX); Serial.print(" ");
+    }
+    Serial.println();
+  }
 
-// Do not change this part.  This exact format is required by USB.
-
-struct usb_string_descriptor_struct usb_string_product_name = {
-        2 + MIDI_NAME_LEN * 2,
-        3,
-        MIDI_NAME
-};
+  /*
+  static uint32_t t_start = millis();
+  if (millis() > t_start + 100) {
+    Serial.println("sending ping");
+    msg.id = random(0x1,0x7FE);
+    for ( uint8_t i = 0; i < 8; i++ ) msg.buf[i] = i + 1;
+    can.write(msg);
+    t_start = millis();
+  } */
+}

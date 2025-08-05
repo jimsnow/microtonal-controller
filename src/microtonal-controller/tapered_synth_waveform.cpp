@@ -30,6 +30,11 @@
 #include "arm_math.h"
 #include "utility/dspinst.h"
 
+/*
+ * Local modification of AudioSynthWaveform to add a slew limiter to volume
+ * increases to reduce audible artifacts.
+ */
+
 void TaperedAudioSynthWaveform::update(void)
 {
 	audio_block_t *block;

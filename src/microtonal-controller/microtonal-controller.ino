@@ -1,6 +1,7 @@
 /**@file microtonal-controller.ino */
+
 /*
-Copyright 2023-2024 Jim Snow
+Copyright 2023-2025 Jim Snow, Desiderata Systems LLC
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -17,9 +18,9 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 */
 
-#define fwversion "1.0.0"
+#define fwversion "1.1.1"
 
-#define hwversion 3
+#define hwversion 4
 
 #include <MIDI.h>
 
@@ -31,6 +32,8 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <WS2812Serial.h>
 #include <FlexCAN_T4.h>
 
+/* Ownership */
+#define noOne 0xffff
 
 /* Pins */
 
@@ -84,7 +87,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define pullupPin4 255
 #endif
 
-#if (hwversion == 3)
+#if (hwversion >= 3)
 #define pullupPin1 0
 #define pullupPin2 1
 #define i2sOutPin 2
@@ -112,6 +115,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #define screenCSPin 36
 #endif
 
+/* hwversion 4 has no software-visible changes from hwversion 3 */
 
 uint32_t debugFlags = 0;
 
@@ -129,598 +133,9 @@ void serialSetup() {
   Serial.begin(115200);
 }
 
-
-/* LEDs */
-
-const int numLeds = 6;
-byte drawingMemory[numLeds * 3];
-DMAMEM byte displayMemory[numLeds * 12];
-WS2812Serial leds(numLeds, displayMemory, drawingMemory, ledPin, WS2812_GRB);
-
-#define RED    0xFF0000
-#define GREEN  0x00FF00
-#define BLUE   0x0000FF
-#define YELLOW 0xFFFF00
-#define PINK   0xFF1088
-#define ORANGE 0xE05800
-#define WHITE  0xFFFFFF
-#define BLACK  0x000000
-#define DIM    0x000100
-
-/*
-#define RED    0x160000
-#define GREEN  0x001600
-#define BLUE   0x000016
-#define YELLOW 0x101400
-#define PINK   0x120009
-#define ORANGE 0x100400
-#define WHITE  0x101010
-*/
-
-void ledSetup() {
-  leds.begin();
-
-  int microsec = 15000 / leds.numPixels();
-  
-  colorWipe(RED, microsec);
-  colorWipe(GREEN, microsec);
-  colorWipe(BLUE, microsec);
-  colorWipe(YELLOW, microsec);
-  colorWipe(PINK, microsec);
-  colorWipe(ORANGE, microsec);
-  colorWipe(WHITE, microsec);
-  colorWipe(BLACK, microsec);
-  leds.setPixel(0, DIM);
-  leds.show();
-}
-
-int colorDiv (int in, int div) {
-  int r = (in & 0xff0000) >> 16;
-  int g = (in & 0x00ff00) >> 8;
-  int b = in & 0x0000ff;
-
-  return (r/div << 16) | (g/div << 8) | (b/div);
-}
-
-void colorWipe(int color, int wait) {
-  for (int i=0; i < leds.numPixels(); i++) {
-    leds.setPixel(i, colorDiv(color, 64));
-    leds.show();
-    delayMicroseconds(wait);
-  }
-}
-
-/* AUDIO */
-
-#include <Audio.h>
-#include <Wire.h>
-#include <SPI.h>
-#include <SD.h>
-#include <SerialFlash.h>
-
-// GUItool: begin automatically generated code
-AudioSynthWaveformSine   sine1;          //xy=323.3333396911621,295.3333330154419
-AudioOutputI2S2          i2s2_1;         //xy=597.3333282470703,333.3333282470703
-AudioConnection          patchCord1(sine1, 0, i2s2_1, 0);
-AudioConnection          patchCord2(sine1, 0, i2s2_1, 1);
-AudioControlSGTL5000     sgtl5000_1;     //xy=445.3333282470703,400.3333282470703
-// GUItool: end automatically generated code
-
-/* A440 test tone */
-
-void audioSetup() {
-  AudioMemory(20);
-  AudioNoInterrupts();
-  sine1.frequency(440.0);
-  sine1.amplitude(0.0);
-  AudioInterrupts();
-  //noise1.amplitude(1.0);
-  //pinMode(mutePin, OUTPUT);
-  //digitalWrite(mutePin, HIGH); /* unmute */
-  Serial.println("audio setup complete");
-}
-
-void setPitchReference(double freq) {
-  AudioNoInterrupts();
-  sine1.frequency(freq);
-  sine1.amplitude(0.1);
-  AudioInterrupts();
-}
-
 /* ADCs */
 
 #define adcChannels 4
-const int adcPins[adcChannels] = {adc1Pin, adc2Pin, adc3Pin, adc4Pin};
-const int adcPullupPins[adcChannels] {pullupPin1, pullupPin2, pullupPin3, pullupPin4};
-
-ADC *adc = new ADC();
-
-void adcSetup() {
-
-  pinMode(LED_BUILTIN, OUTPUT);
-  for (int i=0; i<adcChannels; i++) {
-    int adcPin = adcPins[i];
-    int pullupPin = adcPullupPins[i];
-    pinMode(adcPin, INPUT_DISABLE);
-    if (pullupPin != 255) {
-      pinMode(pullupPin, OUTPUT);
-      digitalWrite(pullupPin, HIGH);
-    }
-  }
-
-  auto convSpeed = ADC_CONVERSION_SPEED::HIGH_SPEED;
-  auto sampleSpeed = ADC_SAMPLING_SPEED::HIGH_SPEED;
-  int resolution = 12;
-  int averaging = 4;
-
-  adc->adc0->setAveraging(averaging);
-  adc->adc0->setResolution(resolution);
-  adc->adc0->setConversionSpeed(convSpeed);
-  adc->adc0->setSamplingSpeed(sampleSpeed);
-
-  adc->adc1->setAveraging(averaging);
-  adc->adc1->setResolution(resolution);
-  adc->adc1->setConversionSpeed(convSpeed);
-  adc->adc1->setSamplingSpeed(sampleSpeed);
-}
-
-int otherChannel(int thisChannel) {
-  switch (thisChannel) {
-    case (0): return 2;
-    case (1): return 3;
-    case (2): return 0;
-    case (3): return 1;
-  }
-  return 0;
-}
-
-/* 
- * Determine how many microseconds to pause before reading ADCs,
- * to give cicuit time to settle after advancing the shift register.
- * We look at the immediate previous 4 values read, and the values
- * for the current 4 as of the last update.
- * If the difference is large on any channel, then we wait longer.
- */
-int getADCDelay(int *prev, int *curr) {
-  int maxDelay = 12;
-  for (int channel = 0; channel < 4; channel++) {
-    int delta = prev[channel] - curr[channel];
-    if (delta < 0) {
-      delta = -delta;
-    }
-
-    int delay = delta / 100;
-    if (delay > maxDelay) {
-      maxDelay = delay;
-    }
-  }
-  return maxDelay;
-}
-
-float adcScale = 1.0f/4095.0f;
-
-/*
- * determine resistance that causes a voltage sag on ADC inputs pulled up
- * by 3.3 volts with a 3.3k or 1k resistor, 200 ohm series resistor
- */
-float valueToResistance(int value) {
-  float v = value * adcScale;
-#if (hwversion < 3)
-  float pullup = 3300.0f;
-#else
-  float pullup = 1000.0f + 20.0f; /* default pin output impedance is probably around 20 ohms */
-#endif
-  float series = 206.0f; /* 200 ohm resister, about 6 ohms more for shift register */
-
-  /* avoid divide by zero */
-  if (1.0f - v < 0.01f) {
-    v = 1.0f - 0.01f;
-  }
-
-  float r = ((v * pullup) / (1.0f - v) - series);
-
-  if (r < 1.0) {
-    r = 1.0;
-  }
-  return r;
-}
-
-/*
- * Measure electrical resistance between channels across the FSR.  Low
- * resistance can throw off ADC readings, so we have to compensate.
- * The resistances change depending on what keys are being pressed, so
- * we need to re-calibrate on every keyboard scan.
- *
- * This should be called before the shift registers have selected bit 0,
- * when the addc channel readings are only affected by driving the pullup
- * pins high or low.
- */
-void calibrateADCs(bool verbose, float cal[adcChannels][adcChannels]) {
-  for (int i = 0; i < adcChannels; i++) {
-    for (int j = 0; j < i; j++) {
-      if (i==j) {
-        cal[i][j] = 1000000.0f;
-        continue;
-      }
-
-      for (int channel = 0; channel < adcChannels; channel++) {
-        int pin = adcPullupPins[channel];
-        if (channel == i) {
-          pinMode(pin, OUTPUT);
-          digitalWrite(pin, HIGH);
-        } else if (channel == j) {
-          pinMode(pin, OUTPUT);
-          digitalWrite(pin, LOW);
-        } else {
-          pinMode(pin, INPUT_DISABLE);
-        }
-      }
-
-      delayMicroseconds(50);
-
-      int v1,v2;
-
-      readADCs(i, v1, j, v2);
-
-      float iadc = ((float)v1) * adcScale;
-      float jadc = ((float)v2) * adcScale;
-
-      float iv = 1.0f - (((1.0f - iadc) * 1220.0f) / 1020.0f);
-      float jv = (jadc * 1220.0f) / 1020.0f;
-      float rijTotal = (2440.0f / (1.0f - (iv -jv))) - 2440.0f;
-
-      //int k, l;
-      //getKl(i, j, k, l);
-
-      //readADCs(k, v1, l, v2);
-
-      //float kadc = ((float)v1) * adcScale;
-      //float ladc = ((float)v2) * adcScale;
-
-      if (verbose) Serial.println("calibration i:" + String(i) + " j:" + String(j) + " iv:" + String((1.0f - iv) * 100.0f) + " jv:" + String(jv * 100.0f) + " rijTotal:" + String(rijTotal));
-
-      //if (verbose) {
-      //  Serial.println("calibration i:" + String(i) + " j:" + String(j) + " iv:" + String((1.0f - iv) * 100.0f) + " jv:" + String(jv * 100.0f) + " rijTotal:" + String(rijTotal) +
-      //    " k:" + String(k) + "(" + String(kadc * 100.0f) + ") l:" + String(l) + "(" + String(ladc * 100.0f) + ")");
-      //}
-      /* store the reciprocal to we don't have to do division later */
-      cal[i][j] = cal[j][i] = 1.0f / rijTotal;
-    }
-  }
-
-  for (int i = 0; i < adcChannels; i++) {
-    int pin = adcPullupPins[i];
-    pinMode(pin, OUTPUT);
-    digitalWrite(pin, HIGH); /* must come after setting mode to output, otherwise ignored */
-  }
-
-  delayMicroseconds(40);
-}
-
-/*
- * Convert a triangle of resistors into an equivalent set of three resistors
- * that meet in a junction.  Uses reciprocal resistance.
- */
-void deltaYConv(float ab, float bc, float ac, float& ra, float& rb, float &rc) {
-  ra = ab + ac + (ab * ac) / bc;
-  rb = ab + bc + (ab * bc) / ac;
-  rc = ac + bc + (bc * ac) / ab;
-}
-
-void rsScale(int i, int j, float scale, float weight, float rs[adcChannels][adcChannels]) {
-  float orig = rs[i][j];
-  float val = (orig * (1.0f - weight)) + (orig * scale * weight);
-
-  rs[i][j] = val;
-  rs[j][i] = val;
-}
-
-/*
- * Compute resistance across two nodes i and j in a fully-connected network of four nodes.
- * Uses reciprocal resistances.
- *
- * This isn't solvable by simplifying parallel and series resistors, so we use delta-Y
- * conversion to transform triangle ilk into three resistors meeting at a new point m.
- *
- * Then we can solve it as series and parallel resistances.
- */
-float rij(int i, int j, int k, int l, float rs[adcChannels][adcChannels]) {
-  float ij = rs[i][j];
-  float ik = rs[i][k];
-  float il = rs[i][l];
-  float jk = rs[j][k];
-  float jl = rs[j][l];
-  float kl = rs[k][l];
-
-  float im, lm, km;
-  deltaYConv(il, kl,ik, im, lm, km);
-
-  float jm1 = 1.0f / ((1.0f / jl) + (1.0f / lm));
-  float jm2 = 1.0f / ((1.0f / jk) + (1.0f / km));
-
-  float jm = jm1 + jm2;
-
-  float ij2 = 1.0f / ((1.0f / im) + (1.0f / jm));
-
-  return ij + ij2;
-}
-
-/*
- * The calibration routine finds the resistance between each channel to the other.
- * That's not exactly what we want, though -- we need to know what the resistance between
- * any two channels would be if we could ignore the electrical path through the other two
- * channels.
- *
- * We figure this out by making an initial guess for the values of all the phantom resistors,
- * calculating what the resistance should be from one channel to the next through all available
- * paths, and then adjusting the values of the resistors according to the discrepency between
- * the two. Hopefully we converge on a solution.
- *
- * There may be more than one solution, in which case our guess will probably be somewhat
- * off.
- *
- * Resistance values are stored as 1/r to avoid division.
- */
-void refineCalibration (const float in[adcChannels][adcChannels], float out[adcChannels][adcChannels], int iterations) {
-  float avg;
-  float sum = 0.0f;
-  for (int i = 1; i < adcChannels; i++) {
-    for (int j = 0; j < i; j++) {
-       sum += in[i][j];
-    }
-  }
-
-  avg = sum / 6.0f;
-
-  /*
-   * Initial guess: adjacent channels have higher throughput than non-adjacent channels, and input matrix
-   * resistance is a lot less than it should be.
-   *  */
-  for (int i = 0; i < adcChannels; i++) {
-    for (int j = 0; j < adcChannels; j++) {
-      float val;
-      float scale = 0.5f;
-      if (i==j) {
-        val = 1000000.0f;
-      } else if ((i + j) % 2 == 0) {
-        val = avg * 0.5f * scale;
-      } else {
-        val = avg * 1.25f * scale;
-      }
-      out[i][j] = val;
-    }
-  }
-
-  while (iterations-- > 0) {
-    for (int i = 0; i < adcChannels; i++) {
-      for (int j = 0; j < adcChannels; j++) {
-        if (i==j) {
-          continue;
-        }
-
-        int k, l;
-        getKl(i, j, k, l);
-
-        float ijGuess = rij(i, j, k, l, out);
-        float ijActual = in[i][j];
-
-        float scale = ijActual / ijGuess;
-
-        rsScale(i, j, scale, 1.0f, out);
-        rsScale(i, k, scale, 0.5f, out);
-        rsScale(i, l, scale, 0.5f, out);
-        rsScale(j, k, scale, 0.5f, out);
-        rsScale(j, l, scale, 0.5f, out);
-        /* leave k,l as it is */
-
-        if (dbg(adcCalibrationDebug)) {
-          Serial.println("refineCalibration " + String(i) + " " + String(j) + " " + String(1.0f/ijGuess) + " " + String(1.0f/ijActual));
-        }
-      }
-    }
-  }
-}
-
-/* given a number from 0-3, populate other arguments with remaining digits in arbitrary order */
-void getJkl(const int i, int &j, int &k, int &l) {
-  for (j = 0; j < adcChannels; j++) {
-    if (j != i) {
-      break;
-    }
-  }
-  for (k = 0; k < adcChannels; k++) {
-    if (k != i && k != j) {
-      break;
-    }
-  }
-  for (l = 0; l < adcChannels; l++) {
-    if (l != i && l != j && l !=k) {
-      break;
-    }
-  }
-
-  if (i + j + k + l != (adcChannels * (adcChannels-1)) / 2) {
-    Serial.println("getJkl logic error");
-  }
-}
-
-void getKl(const int i, const int j, int &k, int &l) {
-  for (k = 0; k < adcChannels; k++) {
-    if (k != i && k != j) {
-      break;
-    }
-  }
-
-  for (l = 0; l < adcChannels; l++) {
-    if (l != i && l != j && l !=k) {
-      break;
-    }
-  }
-
-  if (i + j + k + l != (adcChannels * (adcChannels-1)) / 2) {
-    Serial.println("getKl logic error");
-  }
-}
-
-/*
- * Compute sum of voltages 5, each through its own respective resistor.
- * To avoid divisions, resistor values are input as reciprocals (1.0/r).
- */
-inline float avg5(float v1, float r1, float v2, float r2, float v3, float r3, float v4, float r4, float v5, float r5) {
-  return (v1*r1 + v2*r2 + v3*r3 + v4*r4 + v5*r5) / (r1 + r2 + r3 + r4 + r5);
-}
-
-inline float avg2 (float v1, float r1, float v2, float r2) {
-  return (v1*r1 + v2*r2) / (r1 + r2);
-}
-
-/* 
- * Like avg5, but solve for r1 if we know average voltage already (v).
- * Resistances again input as reciprocals, and output is likewise.
- * derivation from avg5:
- *
- * (v1*r1 + v2*r2 + v3*r3 + v4*r4 + v5*r5) / (r1 + r2 + r3 + r4 + r5) = v
- * (v1*r1 + v2*r2 + v3*r3 + v4*r4 + v5*r5) = v*r1 + v*(r2 + r3 + r4 + r5)
- * v1*r1 + v2*r2 + v3*r3 + v4*r4 + v5*r5 - (v * (r2 + r3 + r4 + r5))  = v*r1
- * v2*r2 + v3*r3 + v4*r4 + v5*r5 - (v * (r2 + r3 + r4 + r5)) = v*r1 - v1*r1
- * v2*r2 + v3*r3 + v4*r4 + v5*r5 - (v * (r2 + r3 + r4 + r5)) = r1 (v-v1)
- * (v2*r2 + v3*r3 + v4*r4 + v5*r5 - (v * (r2 + r3 + r4 + r5)))/(v-v1) = r1
- */
-inline float avg5r1(float v, float v1, float v2, float r2, float v3, float r3, float v4, float r4, float v5, float r5) {
-  float r1 = (v2*r2 + v3*r3 + v4*r4 + v5*r5 - (v * (r2 + r3 + r4 + r5))) / (v - v1);
-
-  if(r1 < 0.0) {
-    return (1.0f / 1000000.0f);
-  }
-
-  /*
-  if (isnan(r1)) {
-    return 1.0f / 100000.0f;
-  }*/
-  return r1;
-}
-
-/*
- * Given a calibration matrix cal, voltages sampled by the ADC and some initial values for the resistances of four channels,
- * compute more accurate resistances.
- * This is only approximate, with "damping" as a tuning parameter.
- */
-void applyCalibration(bool verbose, const float cal[adcChannels][adcChannels], const float vAdc[adcChannels], float r[adcChannels], const int iterations) {
-  float v[adcChannels];
-  float vNext[adcChannels];
-  float rNext[adcChannels];
-  float vOrig[adcChannels];
-  //float rOrigInv[adcChannels];
-
-  for (int i = 0; i < adcChannels; i++) {
-    /* approximate first guess, compensate for 200 ohm resistor */
-    v[i] = 1.0 - (( max((1.0 - vAdc[i]), 0.01)  * 1220.0) / 1020.0);
-    vOrig[i] = v[i];
-    //rOrigInv[i] = 1.0 / r[i];
-  }
-
-  if (verbose) {
-    Serial.println(String(vAdc[0]) + " " + String(vAdc[1]) + " " + String(vAdc[2]) + " " + String(vAdc[3]) +
-                   "|" + String(v[0]) + " " + String(v[1]) + " " + String(v[2]) + " " + String(v[3]) +
-                   "|" + String(r[0]) + " " + String(r[1]) + " " + String(r[2]) + " " + String(r[3]));
-  }
-
-  float damping = 0.8;
-
-  for (int iteration = 0; iteration < iterations; iteration++) {
-
-
-    for (int i = 0; i < adcChannels; i++) {
-      #if 1
-      int j, k, l;
-      getJkl(i, j, k, l);
-
-      /* figure out what value of r1 would cause the voltage we're seeing at v[i] */
-      float ri = 1.0f / avg5r1(vOrig[i], 0.0f, 1.0f, 1.0f/1220.0f, v[j], cal[i][j] * damping, v[k], cal[i][k] * damping, v[l], cal[i][l] * damping);
-      rNext[i] = ri;
-      /* now calculate what voltage v[0] ought to be if the other three channels weren't interfering */
-      vNext[i] = avg2(1.0f, (1.0 / 1220.0f), 0.0, (1.0/ri) );
-
-      //vNext[i] = avg5(1.0f, 1220.0f, v[j], 1.0/cal[i][j], v[k], 1.0/cal[i][k], v[l], 1.0/cal[i][l], 0.0, 1.0/rOrigInv[i]);
-
-      #else
-      vNext[i] = vOrig[i];
-      for (int j = 0; j < adcChannels; j++) {
-        if (i == j) {
-          continue;
-        }
-        int k, l;
-        getKl(i, j, k, l);
-
-        float vdelta = v[j] - v[i];
-        float strength = (cal[i][j]) / ((1.0f / 1220.0f) + (rOrigInv[i]) + (cal[i][j]) + (cal[i][k]) + (cal[i][l]) );
-
-        vNext[i] -= vdelta * strength * damping;
-      }
-      #endif
-    }
-
-    /*
-    for (int i = 0; i < adcChannels; i++) {
-      rNext[i] = (1220.0f / (1.0f - v[i])) - 1220.0f;
-    } */
-
-    for (int i = 0; i < adcChannels; i++) {
-      v[i] = min(max(vNext[i], 0.01f), 0.99f);
-      r[i] = max(rNext[i], 1.0f);
-    }
-    if (verbose) {
-      Serial.println("applyCalibration " + String(v[0]) + " " + String(v[1]) + " " + String(v[2]) + " " + String(v[3]) + " " + String(r[0]) + " " + String(r[1]) + " " + String(r[2]) + " " + String(r[3]));  
-    }
-  }
-}
-
-int readADC(int channel) {
-  return adc->adc0->analogRead(adcPins[channel]);
-}
-
-void readADCs(int channel1, int &value1, int channel2, int &value2) {
-  adc->adc0->startSingleRead(adcPins[channel1]);
-  adc->adc1->startSingleRead(adcPins[channel2]);
-
-  while(!adc->adc0->isComplete()) {};
-  value1 = adc->adc0->readSingle();
-
-  while(!adc->adc1->isComplete()) {};
-  value2 = adc->adc1->readSingle();
-}
-
-void readADCs(int values[adcChannels]) {
-  /* do two reads at a time in parallel */
-  adc->adc0->startSingleRead(adcPins[0]);
-  adc->adc1->startSingleRead(adcPins[1]);
-
-  while(!adc->adc0->isComplete()) {};
-  values[0] = adc->adc0->readSingle();
-  while(!adc->adc1->isComplete()) {};
-  values[1] = adc->adc1->readSingle();
-
-  adc->adc0->startSingleRead(adcPins[2]);
-  adc->adc1->startSingleRead(adcPins[3]);
-
-  while(!adc->adc0->isComplete()) {};
-  values[2] = adc->adc0->readSingle();
-  while(!adc->adc1->isComplete()) {};
-  values[3] = adc->adc1->readSingle();
-}
-
-void computeResistances(bool verbose, const int values[adcChannels], const float calibrationMatrix[adcChannels][adcChannels], float preCalibrationResistances[adcChannels], float resistances[adcChannels], int iterations) {
-  float vAdc[adcChannels];
-
-  for (int i = 0; i < adcChannels; i++) {
-    vAdc[i] = values[i] * adcScale;
-    float r = valueToResistance(values[i]);
-    preCalibrationResistances[i] = r;
-    resistances[i] = r;
-  }
-
-  applyCalibration(verbose, calibrationMatrix, vAdc, resistances, iterations);
-}
 
 float zeroPressureResistance = 5500.0f;
 float maxPressureResistance = 800.0f;
@@ -728,113 +143,29 @@ float maxPressureResistance = 800.0f;
 /*
  * Force can be outside range of 0 (minimum force) to 1 (maximum force)
  */
-inline float resistanceToForce(float r, float area = 1.0f) {
+ 
+float resistanceToForce(float r, float area = 1.0f) {
   return 1.0f - lerpNoClamp(max(area, 2.0f) / maxPressureResistance, 1.0f / r, area / zeroPressureResistance);
-}
-
-/* Shift Registers */
-
-void shiftRegisterSetup() {
-  pinMode(shiftRegisterOutPin, OUTPUT);
-  pinMode(shiftRegisterClockPin, OUTPUT);
-  shiftRegisterReset(0);
 }
 
 const int maxShiftRegisterBits = 8+32;
 
-/* 
- * shift the clock until the whole register is cleared,
- * load a bit at the beginning, but don't update output
- * yet -- no bits are "visible" and curBit is implicitly -1
- */
-void shiftRegisterReset(int curBit) {
-  for (int i = curBit; i < maxShiftRegisterBits; i++) {
-    shiftRegisterClock();
-  }
-  /* load a bit into the shift register */
-  digitalWrite(shiftRegisterOutPin, HIGH);
-  delayMicroseconds(2);
-  shiftRegisterClock();
-  digitalWrite(shiftRegisterOutPin, LOW);
-}
-
-/*
- * reset shift register and cycle the clock, so the output register shows bit 0 set
- * curBit is implicitly zero
- */
-void shiftRegisterResetLoadBit(int curBit) {
-  shiftRegisterReset(curBit);
-  shiftRegisterClock();
-}
-
-void shiftRegisterClock() {
-  digitalWrite(shiftRegisterClockPin, HIGH);
-  delayMicroseconds(2);
-  digitalWrite(shiftRegisterClockPin, LOW);
-  delayMicroseconds(2);
-}
-
-
 /* Screen */
 
-#define TFT_DC      screenDCPin
-#define TFT_CS      screenCSPin
-#define TFT_RST     255  // 255 = unused, connect to 3.3V
-#define TFT_MOSI    sdiPin
-#define TFT_SCLK    sckPin
-#define TFT_MISO    sdoPin
-ILI9341_t3 tft = ILI9341_t3(TFT_CS, TFT_DC, TFT_RST, TFT_MOSI, TFT_SCLK, TFT_MISO);
 
-#define width 320
-#define height 240
-#define menuWidth 140
-#define menuItemHeight 48
-#define statusWidth (width-menuWidth)
-#define statusHeight 32
-#define navButtonWidth (statusWidth/2)
-#define visualizerWidth (statusWidth)
-#define visualizerHeight (height - (menuItemHeight * 2 + statusHeight * 2))
+/* Menu */
 
-#define screenMenuLen 12
+bool lock = false;  /* disables most controls when true */
 
-struct Point {
-  Point() {
-    x = 0;
-    y=0;
-  }
-  Point(uint16_t x, uint16_t y): x{x}, y{y} {
-  };
-  uint16_t x;
-  uint16_t y;
+enum menuItemType {
+  action,
+  toggle,
+  value,
+  floatValue,
+  selection,
+  submenu,
+  empty
 };
-
-struct Rectangle {
-  Rectangle() {
-    p1 = Point();
-    p2 = Point();
-  }
-  Rectangle(Point p1, Point p2) : p1{p1}, p2{p2} {};
-  Rectangle(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2) {
-    p1 = Point(x1, y1);
-    p2 = Point(x2, y2);
-  }
-
-  Point p1;
-  Point p2;
-};
-
-struct Window {
-  Rectangle extent;
-  String text;
-  uint16_t bgcolor;
-  uint16_t fgcolor;
-  bool enabled;
-  bool redraw;
-  bool highlight;
-  uint32_t textUsecs;
-};
-
-#define numWindows 12
 
 enum windowIndex {
   menuText1 = 0,
@@ -851,568 +182,18 @@ enum windowIndex {
   statusBar2
 };
 
+void statusTextUpdate();
+void status1TextUpdate(String text, uint32_t usecs = 0);
 
-struct Window windows[numWindows];
-
-struct Point cursor(const struct Window &window) {
-  uint16_t left = window.extent.p1.x;
-  //uint16_t right = window.extent.p2.x;
-  uint16_t top = window.extent.p1.y;
-  uint16_t bottom = window.extent.p2.y;
-  uint16_t bheight = bottom-top;
-
-  return Point(left+5, top+(bheight/2) - 9);
-}
-
-void setWindowCursor(const struct Window &window) {
-  Point c = cursor(window);
-  tft.setCursor(c.x, c.y);
-}
+#include "menu.h"
 
 uint32_t brightness = 127;
 uint32_t brightnessSet = 255;
 
-bool moreUp = false;
-bool moreDown = false;
-
-void renderScreen(uint32_t deltaUsecs) {
-  for (int i=0; i<numWindows; i++) {
-    if (!windows[i].redraw) {
-      continue;
-    }
-
-    Rectangle r = windows[i].extent;
-    if (!windows[i].enabled) {
-      tft.fillRect(r.p1.x+1, r.p1.y+1, (r.p2.x-r.p1.x)-2, (r.p2.y-r.p1.y)-2, ILI9341_BLACK);
-      windows[i].redraw = false;
-      continue;
-    }
-
-    uint16_t fgcolor, bgcolor;
-
-    if (windows[i].highlight) {
-      fgcolor = windows[i].bgcolor;
-      bgcolor = windows[i].fgcolor;
-    } else {
-      fgcolor = windows[i].fgcolor;
-      bgcolor = windows[i].bgcolor;
-    }
-
-    tft.fillRect(r.p1.x+1, r.p1.y+1, (r.p2.x-r.p1.x)-2, (r.p2.y-r.p1.y)-2, bgcolor);
-    
-    tft.setTextColor(fgcolor);
-    tft.setTextSize(2);
-    setWindowCursor(windows[i]);
-    tft.println(windows[i].text);
-
-    windows[i].redraw = false;
-  }
-
-  if (moreUp) {
-    tft.setTextColor(windows[menuText1].highlight ? windows[menuText1].bgcolor : windows[menuText1].fgcolor);
-    tft.setCursor(52, 0);
-    tft.println("...");
-  }
-
-  if (moreDown) {
-    tft.setTextColor(windows[menuText5].highlight ? windows[menuText5].bgcolor : windows[menuText5].fgcolor);
-    tft.setCursor(52, 218);
-    tft.println("...");
-  }
-
-  if (brightness != brightnessSet) {
-    analogWrite(backlightPin, brightness);
-    brightnessSet = brightness;
-    Serial.println("set brightness to " + String(brightness) + "/255");
-  }
-}
-
-void screenSetup() {
-  for (int i=0; i<numWindows; i++) {
-    windows[i].extent = Rectangle(0,0,0,0);
-    windows[i].text = "";
-    windows[i].bgcolor = ILI9341_DARKGREY;
-    windows[i].fgcolor = ILI9341_WHITE;
-    windows[i].enabled = true;
-    windows[i].redraw = true;
-    windows[i].highlight = false;
-    windows[i].textUsecs = 0;
-  }
-
-
-  for (int i=0; i<5; i++) {
-    windows[i].extent = Rectangle (0, i*menuItemHeight, menuWidth, (i+1)*menuItemHeight);
-  }
-
-  windows[backText].extent  = Rectangle (menuWidth, 0, menuWidth + navButtonWidth, menuItemHeight);
-  windows[fwdText].extent  = Rectangle (menuWidth + navButtonWidth, 0, width, menuItemHeight);
-  windows[cancelText].extent  = Rectangle (menuWidth, menuItemHeight, menuWidth + navButtonWidth, menuItemHeight * 2);
-  windows[okText].extent  = Rectangle (menuWidth + navButtonWidth, menuItemHeight, width, menuItemHeight * 2);
-
-  windows[statusBar1].extent = Rectangle (menuWidth, menuItemHeight * 2, width, menuItemHeight * 2 + statusHeight);
-  windows[statusBar1].bgcolor = ILI9341_BLACK;
-  windows[statusBar2].extent  = Rectangle (menuWidth, height-statusHeight, width, height);
-  windows[statusBar2].bgcolor = ILI9341_BLACK;
-
-  windows[visualizerWindow].extent = Rectangle (menuWidth, menuItemHeight * 2 + statusHeight, width, height - statusHeight);
-  windows[visualizerWindow].bgcolor = ILI9341_BLACK;
-
-  windows[backText].text = "back";
-  windows[backText].enabled = false;
-  windows[fwdText].text = "forward";
-  windows[fwdText].enabled = false;
-  windows[cancelText].text = "cancel";
-  windows[cancelText].enabled = false;
-  windows[okText].text = "ok";
-  windows[okText].enabled = false;
-
-  pinMode(backlightPin, OUTPUT);
-  analogWriteFrequency(backlightPin, 3611*2); /* default is 3.611 kHz */
-  analogWrite(backlightPin, brightness);
-  brightnessSet = brightness;
-
-  Serial.println("3.1 tft:" + String((uint32_t)&tft));
-  delayMicroseconds(100000);
-
-  tft.begin();
-  Serial.println("3.2");
-  delayMicroseconds(100000);
-  tft.setRotation(1);
-  tft.setClock(100000000);
-  tft.fillScreen(ILI9341_BLACK);
-
-  renderScreen(0);
-
-  uint8_t x = tft.readcommand8(ILI9341_RDMODE);
-  Serial.print("Display Power Mode: 0x"); Serial.println(x, HEX);
-  x = tft.readcommand8(ILI9341_RDMADCTL);
-  Serial.print("MADCTL Mode: 0x"); Serial.println(x, HEX);
-  x = tft.readcommand8(ILI9341_RDPIXFMT);
-  Serial.print("Pixel Format: 0x"); Serial.println(x, HEX);
-  x = tft.readcommand8(ILI9341_RDIMGFMT);
-  Serial.print("Image Format: 0x"); Serial.println(x, HEX);
-  x = tft.readcommand8(ILI9341_RDSELFDIAG);
-  Serial.print("Self Diagnostic: 0x"); Serial.println(x, HEX); 
-  Serial.println("5");
-}
-
-/*
- * Update one column of visualizer -- typically the height of each column will
- * correspond to the value from that analog input.
- * We can display 3 values at once by treating red green and blue separately.
- * r, g, and b should be from 0.0 to 1.0.
- */
-void visualizerUpdateGraph(int column, float r, float g, float b) {
-  if (windows[visualizerWindow].enabled == true) {
-    return;
-  }
-
-  if (column < 0 || column >= visualizerWidth) {
-    return;
-  }
-
-  r = clamp(r);
-  g = clamp(g);
-  b = clamp(b);
-
-  int rHeight = r * (visualizerHeight - 4);
-  int gHeight = g * (visualizerHeight - 4);
-  int bHeight = b * (visualizerHeight - 4);
-
-  int minHeight = 0;
-  int midHeight = 0;
-  int maxHeight = 0;
-
-  uint16_t cmin = ILI9341_WHITE;
-  uint16_t c2 = 0;
-  uint16_t c3 = 0;
-  uint16_t cmax = ILI9341_BLACK;
-
-  if (r <= g && r <= b) {
-    minHeight = rHeight;
-    c2 = ILI9341_CYAN;
-    if (g <= b) {
-      midHeight = gHeight;
-      maxHeight = bHeight;
-      c3 = ILI9341_BLUE;
-    } else {
-      midHeight = bHeight;
-      maxHeight = gHeight;
-      c3 = ILI9341_GREEN;
-    }
-  } else if (g <= r && g <= b) {
-    minHeight = gHeight;
-    c2 = ILI9341_MAGENTA;
-    if (r <= b) {
-      midHeight = rHeight;
-      maxHeight = bHeight;
-      c3 = ILI9341_BLUE;
-    } else {
-      midHeight = bHeight;
-      maxHeight = rHeight;
-      c3 = ILI9341_RED;
-    }
-  } else {
-    minHeight = bHeight;
-    c2 = ILI9341_YELLOW;
-    if (r <= g) {
-      midHeight = rHeight;
-      maxHeight = gHeight;
-      c3 = ILI9341_GREEN; 
-    } else {
-      midHeight = gHeight;
-      maxHeight = rHeight;
-      c3 = ILI9341_RED;
-    }
-  }
-
-  int x = windows[visualizerWindow].extent.p1.x + column + 1;
-  int y = windows[visualizerWindow].extent.p2.y - 2;
-  tft.drawLine(x, y, x, y-minHeight, cmin);
-  tft.drawLine(x, y-(minHeight+1), x, y-midHeight, c2);
-  tft.drawLine(x, y-(midHeight+1), x, y-maxHeight, c3);
-  tft.drawLine(x, y-(maxHeight+1), x, y-(visualizerHeight-4), cmax);
-}
-
-// MENU
-
-int lock = false;  /* disables most controls when true */
-
-enum menuItemType {
-  action,
-  toggle,
-  value,
-  selection,
-  submenu,
-  empty
-};
-
-
-/* menu item that's selected for editing */
-struct MenuItem* editItem = nullptr;
-
-struct MenuItem {
-  MenuItem(String text, menuItemType type,
-          struct MenuItem* m1 = nullptr,
-          struct MenuItem *m2 = nullptr,
-          struct MenuItem *m3 = nullptr,
-          struct MenuItem *m4 = nullptr,
-          struct MenuItem *m5 = nullptr) : text{text}, type{type} {
-    select = nullptr;
-    numChildren = 0;
-    data = 0;
-
-    if (m1 != nullptr && type == submenu) {
-      children[numChildren++] = m1;
-      if (m2 != nullptr) {
-        children[numChildren++] = m2;
-        if (m3 != nullptr) {
-          children[numChildren++] = m3;
-          if (m4 != nullptr) {
-            children[numChildren++] = m4;
-            if (m5 != nullptr) {
-              children[numChildren++] = m5;  
-            }
-          }
-        }
-      }
-    }
-  }
-  MenuItem(String text, menuItemType type, struct MenuItem **items, uint16_t numItems) : text{text}, type{type}, childrenExtended{items}, numChildren{numItems} {
-    for (int i = 0; i < 5 && i < numItems; i++) {
-      children[i] = items[i];
-    }
-  }
-  MenuItem(String text, void (*select)(void *data), void *data = nullptr) : text{text}, type{action}, select{select}, data{data} {}
-  MenuItem(String text, enum menuItemType type, void *data, uint32_t *minValue, uint32_t *maxValue) : text{text}, type{type}, data{data}, minValue{minValue}, maxValue{maxValue} {}
-  MenuItem(String text, enum menuItemType type, void *data, uint32_t defaultValue = 0, void (*select)(void *data) = nullptr) : text{text}, type{type}, select{select}, data{data}, defaultValue{defaultValue} {
-    if (type == toggle && data != nullptr) {
-      highlight = *((bool*)data);
-    }
-
-    if (type == selection) {
-      highlight = defaultValue == *(uint32_t*)data;
-    }
-  }
-
-
-  bool checkHighlight() {
-    switch (type) {
-      case toggle:
-        highlight = *(bool*)data != false;
-        break;
-      case action:
-        highlight = false;
-        break;
-      case selection:
-        highlight = *(uint32_t*)data == defaultValue;
-        break;
-      case value:
-        highlight = editItem == this;
-        break;
-      default:
-        highlight = false;
-        break;
-    }
-
-    return highlight;
-  }
-
-  void addOption(struct MenuItem *item, int index) {
-    if (index < 0 || index > 2) {
-      return;
-    }
-
-    options[index] = item;
-  }
-
-
-  String text;
-  enum menuItemType type;
-  void (*select)(void* data) = nullptr;
-  void *data = nullptr;
-  uint32_t defaultValue = 0; /* for "selection" type, the value to set data to */
-  uint32_t *minValue = nullptr;
-  uint32_t *maxValue = nullptr;
-  struct MenuItem** childrenExtended = nullptr;
-  uint16_t numChildren = 0;
-  struct MenuItem* children[5];
-  int scrollOffset = 0;
-  bool highlight = false;
-  struct MenuItem* options[3] = {};
-};
-
-#define menuStackSize 10
-struct MenuItem* menuStack[menuStackSize];
-uint16_t menuStackPos = 0; /* points to first unoccupied slot */
-
 struct MenuItem emptyMenuItem = MenuItem("", empty);
-struct MenuItem* menu[9] = {&emptyMenuItem, &emptyMenuItem, &emptyMenuItem, &emptyMenuItem, &emptyMenuItem, &emptyMenuItem, &emptyMenuItem,  &emptyMenuItem, &emptyMenuItem};
-
-void statusTextUpdate();
-
-void menuSelect(struct MenuItem *item, uint16_t button) {
-  if (item == nullptr) {
-    return;
-  }
-
-  if (item->type == submenu) {
-    for (int i=0; i < 5; i++) {
-      if (i + item->scrollOffset < item->numChildren) {
-        windows[i].bgcolor = ILI9341_DARKGREY;
-        windows[i].text = item->children[i]->text;
-        windows[i].enabled = item->children[i]->type != empty;
-        menu[i] = item->children[i];
-        Serial.println("displaying menu item " + String(i) + " " + windows[i].text);
-      } else {
-        windows[i].enabled = false;
-        menu[i] = &emptyMenuItem;
-      }
-      windows[i].redraw = true;
-    }
-
-    for (int i=0; i < 3; i++) {
-      if (item->options[i] != nullptr) {
-        windows[6+i].bgcolor = ILI9341_DARKGREY;
-        windows[6+i].text = item->options[i]->text;
-        windows[6+i].enabled = item->options[i]->type != empty;
-        menu[6+i] = item->options[i];
-      } else {
-        windows[6+i].enabled = false;
-        menu[6+i] = &emptyMenuItem;
-      }
-      windows[6+i].redraw = true;
-    }
-
-    windows[backText].enabled = menuStackPos > 0;
-    windows[backText].redraw = true;
-
-    menuStack[menuStackPos] = item;
-    menuStackPos++;
-
-    if (menuStackPos >= menuStackSize) {
-      menuStackPos = menuStackSize - 1;
-      Serial.println("menu stack overflow");
-    }
-
-    moreUp = item->scrollOffset > 0;
-    moreDown = item->scrollOffset + 5 < item->numChildren; 
-  }
-
-  if (item->type == toggle) {
-    if (item->data != nullptr) {
-      *((bool*)(item->data)) = !*(bool*)(item->data);
-      Serial.println("toggled " + String(*((bool*)(item->data))));
-    }
-  }
-
-  if (item->type == selection) {
-    if (item->data != nullptr) {
-      *((uint32_t*)(item->data)) = item->defaultValue;
-    }
-  }
-
-  if (item->type == value) {
-    windows[visualizerWindow].text = String(*(uint32_t *)(item->data));
-    windows[visualizerWindow].enabled = true;
-    editItem = item;
-    windows[visualizerWindow].redraw = true;
-  } else if (windows[visualizerWindow].enabled == true) {
-    editItem = nullptr;
-    windows[visualizerWindow].text = "";
-    windows[visualizerWindow].redraw = true;
-    windows[visualizerWindow].enabled = false;
-  }
-
-  if (item->select != nullptr) {
-    item->select(item->data);
-  }
-
-  if (menuStackPos > 0) {
-    struct MenuItem *parent = menuStack[menuStackPos-1];
-    for (int i = 0; i + parent->scrollOffset < parent->numChildren && i < 5; i++) {
-      auto child = parent->children[i];
-      bool prevHighlight = child->highlight;
-
-      windows[i].highlight = child->checkHighlight();
-      if (windows[i].highlight != prevHighlight) {
-        windows[i].redraw = true;
-      }
-    }
-
-    for (int i = 0; i < 3; i++) {
-      auto option = parent->options[i];
-      if (option == nullptr) {
-        continue;
-      }
-      bool prevHighlight = option->highlight;
-      windows[6+i].highlight = option->checkHighlight();
-      if (windows[6+i].highlight != prevHighlight) {
-        windows[6+i].redraw = true;
-      }
-    }
-  }
-
-  if (item->type != submenu) {
-    statusTextUpdate();
-    windows[statusBar1].redraw = true;
-    windows[statusBar2].redraw = true;
-  }
-}
-
-void menuScroll(int offset) {
-  struct MenuItem *item = menuStack[menuStackPos-1];
-
-  if (item == nullptr || item->type != submenu || item->childrenExtended == nullptr) {
-    return;
-  }
-
-  if (offset > 0) {
-    if (item->scrollOffset + offset + 5 > item->numChildren) {
-      offset = 0;
-    }
-  } else {
-    if (item->scrollOffset + offset < 0) {
-      offset = 0;
-    }
-  }
-
-  item->scrollOffset += offset;
-
-  Serial.println("menuScroll offset " + String(offset));
-
-  moreUp = item->scrollOffset > 0;
-  moreDown = item->scrollOffset + 5 < item->numChildren;
-
-  for (int i = 0; i < 5; i++) {
-    if (i + item->scrollOffset < item->numChildren) {
-      item->children[i] = item->childrenExtended[i + item->scrollOffset];
-
-      Serial.println("menu " + String(i) + " " + item->children[i]->text);
-    } else {
-      item->children[i] = nullptr;
-    }
-
-    if (offset != 0) {
-      menu[i] = item->children[i] == nullptr ? &emptyMenuItem : item->children[i];
-      windows[i].text = menu[i]->text;
-      windows[i].highlight = item->children[i]->checkHighlight();
-      windows[i].redraw = true;
-    }
-  }
-}
-
-void menuPress(uint8_t button, uint16_t pressure, uint32_t deltaUsecs) {
-  windows[button].highlight = !windows[button].highlight;
-  windows[button].redraw = true;
-}
-
-void menuRelease(uint8_t button, uint16_t pressure, uint32_t deltaUsecs) {
-  windows[button].highlight = !windows[button].highlight;
-  windows[button].redraw = true;
-  if (button == backText) {
-    Serial.println("back button released");
-    menuBack();
-  } else {
-    Serial.println("released button " + String(button));
-    menuSelect(menu[button], button);
-  }
-}
-
-void menuBack() {
-  if (menuStackPos > 1) {
-    menuStackPos-=2;
-
-    windows[backText].enabled = menuStackPos > 0;
-    windows[backText].redraw = true;
-    menuSelect(menuStack[menuStackPos], menuStackPos);
-  }
-}
-
-void menuUpdate(uint32_t deltaUsecs) {
-  struct Window* status1 = &windows[statusBar1];
-  if (status1->textUsecs > 0) {
-    if (deltaUsecs >= status1->textUsecs) {
-      status1->textUsecs = 0;
-      status1->text = "";
-      status1->redraw = true;
-    } else {
-      status1->textUsecs -= deltaUsecs;
-    }
-  }
-}
 
 /* CAN BUS */
 
-FlexCAN_T4<CAN1, RX_SIZE_256, TX_SIZE_16> can;
-
-void canSetup() {
-  can.begin();
-  can.setBaudRate(1000000);
-}
-
-void canUpdate() {
-  CAN_message_t msg;
-  if (can.read(msg)){
-    Serial.print("can message received ID 0x");
-    Serial.print(msg.id, HEX);
-    Serial.print(" data ");
-    for (int i = 0; i < 8; i++) {
-      Serial.print(msg.buf[i], HEX); Serial.print(" ");
-    }
-    Serial.println();
-  }
-
-  /*
-  static uint32_t t_start = millis();
-  if (millis() > t_start + 100) {
-    Serial.println("sending ping");
-    msg.id = random(0x1,0x7FE);
-    for ( uint8_t i = 0; i < 8; i++ ) msg.buf[i] = i + 1;
-    can.write(msg);
-    t_start = millis();
-  } */
-}
 
 /* MIDI */
 
@@ -1433,7 +214,7 @@ MIDI_CREATE_CUSTOM_INSTANCE(HardwareSerial, Serial5, dinMidi, MidiLocalSettings)
 
 uint64_t midiMsgsSent = 0;
 uint64_t midiMsgsReceived = 0;
-int pressureBackoff = 5000;
+uint32_t pressureBackoff = 5000;
 
 #define doMidi(func, ...) { \
   midiMsgsSent++; \
@@ -1539,11 +320,12 @@ void midiSetup(){
   Serial.println("midiBufferSize set to " + String(midiBufferSize)); /* the default size appears to be 39 bytes */
 }
 
+// monitor serial send buffer to avoid overrunning it
+// (we should probably do likewise for usb)
 int midiBufferInUse() {
   if (useDinMidi) {
     int avail = Serial5.availableForWrite();
     int inUse = midiBufferSize - avail;
-    //Serial.println("midiBufferInUse " + String(inUse) + "/" + String(midiBufferSize) + " : " + String(avail));
     if (inUse < 0) {
       return 0;
     }
@@ -1552,23 +334,22 @@ int midiBufferInUse() {
   return 0;
 }
 
+// test if there's enough send buffer space to send at least a few more MIDI messages
 bool midiReady() {
-  int inUse = midiBufferInUse();
-  if (inUse > 1000 || inUse < -1000) {
-    Serial.println("midiReady inUse = " + String(inUse));
-  }
-
   return midiBufferInUse() < 15;
 }
 
+// test if the send buffer backlog is short enough we can send low-priority messages
 bool midiReadyLowPriority() {
   return midiBufferInUse() < 10;
 }
 
+// test if the send buff is empty
 bool midiIdle() {
   return midiBufferInUse() == 0;
 }
 
+// wait for send buffer space to become available
 void midiReadyWait() {
   int iterations = 0;
   while (!midiReady()) {
@@ -1581,18 +362,13 @@ void midiReadyWait() {
   };
 }
 
-
+/* MPE */
 float mpePolyAfterTouchMin = 0.75f;
 float mpePolyAfterTouchMax = 1.25f;
 
-
-/* MPE */
-
-int mpeChannels = 16;
-int mpeChannelsSet = mpeChannels;
-int firstMpeChannel = 0;
-
-#define noOne 0xffff
+uint32_t mpeChannels = 16;
+uint32_t mpeChannelsSet = mpeChannels;
+uint32_t firstMpeChannel = 0;
 
 struct MpeChannelState{
   int channel;
@@ -1613,7 +389,6 @@ struct MpeChannelState{
   uint8_t lastBankMsb;
   uint8_t lastBankLsb;
   double originalPitch;
-  void (*stealCallback)(uint16_t owner);
 };
 
 /* Store state of "global" CCs that should affect all channels the same. */
@@ -1684,12 +459,12 @@ uint32_t mpeIdleScore(int channel) {
 bool skipChannel10 = false;
 
 struct MpeChannelState *getMpeChannel() {
-  int bestChannel = 0;
+  uint32_t bestChannel = 0;
   uint32_t bestScore = 0;
   if (!midiReady()) {
     return nullptr;
   }
-  for (int channel = firstMpeChannel; channel < firstMpeChannel+mpeChannels; channel++) {
+  for (uint32_t channel = firstMpeChannel; channel < firstMpeChannel+mpeChannels; channel++) {
     if (channel+1 == 10 && skipChannel10) {
       continue;
     }
@@ -1705,10 +480,7 @@ struct MpeChannelState *getMpeChannel() {
   if (state->playing  && state->age > 100000) {
     /* steal note */
     Serial.println("stealing note");
-    endMpeNote(state);
-    if (state->stealCallback != nullptr) {
-      state->stealCallback(state->owner);
-    }
+    endMpeNote(state, state->owner);
     return state;
   }
 
@@ -1727,9 +499,18 @@ uint32_t pressureCCSet = pressureCC;
 uint32_t maxMpePressure = 127;
 uint32_t minMpePressure = 0;
 
+double pbUp = 0.0;
+double pbDown = 0.0;
+
 /* seconds from full to none, or vice versa */
 double attack = 0.0;
 double decay = 1.0;
+
+// 1/seconds to fall from full intensity
+float volumeReleaseRate = 2.0f;
+float volumeAttackRate = 1000000.0f;
+float filterReleaseRate = 2.0f;
+float filterAttackRate = 1000000.0f;
 
 double pitchToCents(double pitch) {
   return (log(pitch) / log(2.0)) * 1200.0;
@@ -1782,10 +563,7 @@ bool unlockBankRangeSet = unlockBankRange;
 enum midiType midiType = mpe;
 
 double masterPbUpRange = 3.0/2.0;
-double masterPbDownRange = 2.0/3.0;
-
-double pbUp = 0.0;
-double pbDown = 0.0;
+double masterPbDownRange = 1.0/2.0;  // 2.0/3.0;
 
 uint32_t masterPbAge = 0;
 int16_t lastMasterPb = 0;
@@ -1795,34 +573,34 @@ double masterPbRange = 12.0;
 
 bool forcePbRange = false;
 
-// 1/seconds to fall from full intensity
-float volumeReleaseRate = 2.0f;
-float volumeAttackRate = 1000000.0f;
-float filterReleaseRate = 2.0f;
-float filterAttackRate = 1000000.0f;
-
-float pressureExponent = 0.8f;
-
 bool delayNoteOff = false;
 bool noteOnFirst = false;
 bool doFB01Setup = false;
 
-int minVelocity = 1; /* minimum MIDI note-on velocity, range: 1-127 */
+uint32_t minVelocity = 1; /* minimum MIDI note-on velocity, range: 1-127 */
 
 double pitchReferenceHz() {
-  double c = 440.0 / (pow(pow(2, 1.0/12.0), 9));
+  static double c = 440.0 / (pow(pow(2, 1.0/12.0), 9));
 
   return c * transpose;
 }
 
-int16_t calculatePitchBend(double pbUp, double pbDown, double pitch, double pbRange) {
+double calculatePitchBendCents(double pbUp, double pbDown) {
   double pb = clampDoubleBipolar(pbUp - pbDown);
-
   double cents = pb > 0
     ? pitchToCents(masterPbUpRange) * pb
     : pitchToCents(masterPbDownRange) * -pb;
 
-  cents += pitchToCents(pitch);
+  return cents;
+}
+
+double calculatePitchBend(double pbUp, double pbDown) {
+  return centsToPitch(calculatePitchBendCents(pbUp, pbDown));
+}
+
+int16_t calculateMidiPitchBend(double pbUp, double pbDown, double pitch, double pbRange) {
+
+  double cents = calculatePitchBendCents(pbUp, pbDown) + pitchToCents(pitch);
     
   double range = (double)MIDI_PITCHBEND_MAX - (double)MIDI_PITCHBEND_MIN;
   int pbi = (int)((range / (pbRange * 2.0)) * (cents / 100.0));
@@ -1925,13 +703,13 @@ void prepareChannel(struct MpeChannelState *state) {
   }
 }
 
-int bendUpOnly = false;
-int bendDownOnly = false;
-int enableBender = true;
+bool bendUpOnly = false;
+bool bendDownOnly = false;
+bool enableBender = true;
 
-struct MpeChannelState *beginMpeNote(double pitch, double velocity, double pressure, uint16_t owner, void stealCallback(uint16_t)) {
+struct MpeChannelState *beginMpeNote(double pitch, double velocity, double pressure, uint16_t owner) {
 
-  int v = (int) (1.0 + (velocity*126));
+  uint32_t v = (int) (1.0 + (velocity*126));
   if (v > 127) {
     v = 127;
   } else if (v < minVelocity) {
@@ -1961,12 +739,12 @@ struct MpeChannelState *beginMpeNote(double pitch, double velocity, double press
     cents -= 100.0f;
   }
 
-  int note = middleC + semitones;
+  uint32_t note = middleC + semitones;
   int16_t pb;
   if (midiType == mpe) {
-    pb = calculatePitchBend(0.0, 0.0, centsToPitch(cents), (double)pbRange);
+    pb = calculateMidiPitchBend(0.0, 0.0, centsToPitch(cents), (double)pbRange);
   } else {
-    pb = calculatePitchBend(pbUp, pbDown, centsToPitch(cents), (double)pbRange);
+    pb = calculateMidiPitchBend(pbUp, pbDown, centsToPitch(cents), (double)pbRange);
   }
 
   if (note < 0) {
@@ -1978,7 +756,6 @@ struct MpeChannelState *beginMpeNote(double pitch, double velocity, double press
     Serial.println(note);
     return nullptr;
   }
-
 
   struct MpeChannelState *state = getMpeChannel();
   if (state == nullptr) {
@@ -1993,7 +770,6 @@ struct MpeChannelState *beginMpeNote(double pitch, double velocity, double press
 
   state->age = 0;
   state->owner = owner;
-  state->stealCallback = stealCallback;
 
   if(midiReady()) {
     state->lastNote = note;
@@ -2013,17 +789,7 @@ struct MpeChannelState *beginMpeNote(double pitch, double velocity, double press
       state->playing = true;
     }
 
-    if (!continueMpeNote(state, pressure, 0)) {
-      state->playing = false;
-      state->owner = noOne;
-      Serial.println("beginMpeNote: continueMpeNote failed");
-
-      if (state->playing) {
-        endMpeNote(state);
-      }
-
-      return nullptr;
-    }
+    continueMpeNote(state, pressure, 0, owner);
 
     if (!noteOnFirst) {
       midiNoteOn(note, v, state->channel+1);
@@ -2038,7 +804,12 @@ struct MpeChannelState *beginMpeNote(double pitch, double velocity, double press
   return state;
 }
 
-bool continueMpeNote(struct MpeChannelState *state, double pressure, uint32_t deltaUsecs) {
+void continueMpeNote(struct MpeChannelState *state, double pressure, uint32_t deltaUsecs, uint16_t owner) {
+
+  if (state == nullptr || state->owner != owner) {
+    return;
+  }
+
   uint32_t concurrentNotes = noteOnCount - noteOffCount;
 
   float volume, filter;
@@ -2048,7 +819,7 @@ bool continueMpeNote(struct MpeChannelState *state, double pressure, uint32_t de
   }
 
   float minVolume = state->volume - (volumeReleaseRate * (state->volume + 0.2f)) * ((float)deltaUsecs/1000000.0f);
-  float maxVolume = state->volume + volumeAttackRate  * ((float)deltaUsecs/1000000.0f) * (pressure * pressure);
+  float maxVolume = state->volume + volumeAttackRate  * ((float)deltaUsecs/1000000.0f) * (pressure);
   if (pressure < minVolume) {
     volume = minVolume;
   } else if (pressure > maxVolume) {
@@ -2072,7 +843,7 @@ bool continueMpeNote(struct MpeChannelState *state, double pressure, uint32_t de
   /* rate limit pressure updates */
   if (state->volumeAge + deltaUsecs < pressureBackoff * concurrentNotes) {
     state->volumeAge += deltaUsecs;
-    return true;
+    return;
   }
 
   int max = maxMpePressure;
@@ -2128,50 +899,47 @@ bool continueMpeNote(struct MpeChannelState *state, double pressure, uint32_t de
   }
 
   if (state->playing && delayNoteOff && volume <= 0.0f) {
-    if (endMpeNote(state)) {
-      Serial.println("note decayed...");
-      return false;
-    }
+    endMpeNote(state, owner);
   }
   
-  return true;
+  return;
 }
 
-bool endMpeNote(struct MpeChannelState *state) {
-  if (midiReady()) {
-    state->age = 0;
-    /* if note wasn't already stolen */
-    if (state->playing == true) {
-      midiNoteOff(state->lastNote, 63, state->channel+1);
-      Serial.println("sent note-off channel " + String(state->channel+1) + " note " + String(state->lastNote));
-      state->lastPolyAT = 0;
-    }
-    state->playing = false;
-
-    return true;
+void endMpeNote(struct MpeChannelState *state, uint16_t owner) {
+  if (state == nullptr || state->owner != owner) {
+    return;
   }
-  return false;
+
+  state->age = 0;
+  state->playing = false;
+  midiReadyWait();
+  midiNoteOff(state->lastNote, 63, state->channel+1);
+
+  Serial.println("sent note-off channel " + String(state->channel+1) + " note " + String(state->lastNote));
+  state->lastPolyAT = 0;
+  state->owner = noOne;
 }
 
 void doMpeMasterPitchbend(double pbUp, double pbDown, uint32_t deltaUsecs) {
   if (!enableBender) {
     pbUp = 0.0; pbDown = 0.0;
   }
+
   if (deltaUsecs < masterPbBackoff - masterPbAge) {
     masterPbAge += deltaUsecs;
     return;
   }
 
   if (midiType == mpe || midiType == tuningtable) {
-    int16_t pbi = calculatePitchBend(pbUp, pbDown, 1.0, masterPbRange);
+    int16_t pbi = calculateMidiPitchBend(pbUp, pbDown, 1.0, masterPbRange);
     if (pbi != lastMasterPb) {
       midiPitchBend(pbi, 1);
       lastMasterPb = pbi;
     }
   } else if (midiType == multitimbral || midiType == monotimbral || midiType == monovoice) {
-    for (int channel = firstMpeChannel; channel < firstMpeChannel+mpeChannels; channel++) {
+    for (uint32_t channel = firstMpeChannel; channel < firstMpeChannel+mpeChannels; channel++) {
       if (mpeState[channel].playing) {
-        int16_t pbi = calculatePitchBend(pbUp, pbDown, mpeState[channel].lastBendInterval, (double)pbRange);
+        int16_t pbi = calculateMidiPitchBend(pbUp, pbDown, mpeState[channel].lastBendInterval, (double)pbRange);
         if (mpeState[channel].lastPitchBend != pbi) {
           midiPitchBend(pbi, channel+1);
           mpeState[channel].lastPitchBend = pbi;
@@ -2223,33 +991,29 @@ struct MidiTuningTableEntry *tuningTableLookup(float pitch, struct MidiTuningTab
 }
 
 
-struct MidiTuningTableEntry* beginTuningTableNote(double pitch, double velocity, double pressure, uint16_t owner, void stealCallback(uint16_t)) {
+struct MidiTuningTableEntry* beginTuningTableNote(double pitch, double velocity, double pressure, uint16_t owner) {
   if (midiTuningTable == nullptr || midiTuningTableSize == 0) {
     return nullptr;
   }
 
   struct MidiTuningTableEntry *tte = tuningTableLookup(pitch, midiTuningTable, midiTuningTableSize);
   
-  if (midiReady()) {
-    int v = (int) (1.0 + (velocity*126));
-    if (v > 127) {
-      v = 127;
-    } else if (v < 1) {
-      v = 1;
-    }
-
-    midiNoteOn(tte->noteNumber, v, tte->channel + 1);
-    tte->users++;
-    tte->lastPressure = 127;
-    tte->pressureAge = 0;
-    return tte;
+  int v = (int) (1.0 + (velocity*126));
+  if (v > 127) {
+    v = 127;
+  } else if (v < 1) {
+    v = 1;
   }
 
-  return nullptr;
+  midiReadyWait();
+  midiNoteOn(tte->noteNumber, v, tte->channel + 1);
+  tte->users++;
+  tte->lastPressure = 127;
+  tte->pressureAge = 0;
+  return tte;
 }
 
-
-bool continueTuningTableNote(struct MidiTuningTableEntry *tte, double pressure, uint32_t deltaUsecs) {
+void continueTuningTableNote(struct MidiTuningTableEntry *tte, double pressure, uint32_t deltaUsecs, int16_t owner) {
   uint32_t concurrentNotes = noteOnCount - noteOffCount;
 
   if (pressure < 0.0f) {
@@ -2259,11 +1023,11 @@ bool continueTuningTableNote(struct MidiTuningTableEntry *tte, double pressure, 
   /* rate limit pressure updates */
   if (tte->pressureAge + deltaUsecs < pressureBackoff * concurrentNotes) {
     tte->pressureAge += deltaUsecs;
-    return true;
+    return;
   }
 
   if (!midiReady()) {
-    return true;
+    return;
   }
 
   if (doMpePolyAfterTouch) {
@@ -2282,18 +1046,13 @@ bool continueTuningTableNote(struct MidiTuningTableEntry *tte, double pressure, 
 
     tte->pressureAge = 0;
   }
-
-  return true; 
 }
 
-bool endTuningTableNote(struct MidiTuningTableEntry* tte) {
+void endTuningTableNote(struct MidiTuningTableEntry* tte, uint16_t owner) {
   if (midiReady()) {
     midiNoteOff(tte->noteNumber, 63, tte->channel + 1);
     tte->users--;
-    return true;
   }
-
-  return false;
 }
 
 /* return the buffer offset for a given midi note and sub-byte */
@@ -2354,72 +1113,62 @@ void sendETuningTable(uint8_t channel = 0) {
 
 /* GENERIC VOICE API */
 
+bool doLocalSynth = true;
+
 struct VoiceHandle {
-  int stolen(int owner) {
-    if (this->midiType == tuningtable) {
-      return false;
-    }
-
-    if (!mpeState) {
-      return true;
-    }
-
-    return mpeState->owner != owner;
-  }
-
   enum midiType midiType;
   union {
     struct MpeChannelState *mpeState;
     struct MidiTuningTableEntry *tte;
   };
+  struct SynthVoice *voice;
 };
 
-bool beginNote(struct VoiceHandle &voiceHandle, float pitch, float velocity, float pressure, uint16_t owner, void stealCallback(uint16_t)) {
+void beginNote(struct VoiceHandle &voiceHandle, float pitch, float velocity, float pressure, uint16_t owner) {
   switch (midiType) {
     case tuningtable:
       {
-        struct MidiTuningTableEntry *tte = beginTuningTableNote(pitch, velocity, pressure, owner, stealCallback);
-        if (tte == nullptr) {
-          return false;
-        }
+        struct MidiTuningTableEntry *tte = beginTuningTableNote(pitch, velocity, pressure, owner);
         voiceHandle.tte = tte;
         break;
       }
     default:
       {
-        struct MpeChannelState *state = beginMpeNote(pitch, velocity, pressure, owner, stealCallback);
-        if (state == nullptr) {
-          return false;
-        }
-        state->owner = owner;
+        struct MpeChannelState *state = beginMpeNote(pitch, velocity, pressure, owner);
         voiceHandle.mpeState = state;
         break;
       }
   }
 
+  if (doLocalSynth) {
+    voiceHandle.voice = beginSynthNote(pitch, velocity, pressure, owner);
+  }
+
   voiceHandle.midiType = midiType;
-  return true;
 }
 
-bool continueNote(struct VoiceHandle& voiceHandle, float pressure, uint32_t deltaUsecs) {
+void continueNote(struct VoiceHandle& voiceHandle, float pressure, uint32_t deltaUsecs, uint16_t owner) {
   switch (voiceHandle.midiType) {
     case tuningtable:
-      return continueTuningTableNote(voiceHandle.tte, pressure, deltaUsecs);
+      continueTuningTableNote(voiceHandle.tte, pressure, deltaUsecs, owner);
     default:
-      return continueMpeNote(voiceHandle.mpeState, pressure, deltaUsecs);
+      continueMpeNote(voiceHandle.mpeState, pressure, deltaUsecs, owner);
+  }
+
+  if (doLocalSynth) {
+    continueSynthNote(voiceHandle.voice, pressure, deltaUsecs, owner);
   }
 }
 
-bool endNote(struct VoiceHandle& voiceHandle) {
+void endNote(struct VoiceHandle& voiceHandle, uint16_t owner) {
+  if (doLocalSynth) {
+    endSynthNote(voiceHandle.voice, owner);
+  }
   switch (voiceHandle.midiType) {
     case tuningtable:
-      return endTuningTableNote(voiceHandle.tte);
+      endTuningTableNote(voiceHandle.tte, owner);
     default:
-      if(endMpeNote(voiceHandle.mpeState)) {
-        voiceHandle.mpeState->owner = noOne;
-        return true;
-      }
-      return false;
+      endMpeNote(voiceHandle.mpeState, owner);
   }
 }
 
@@ -2500,10 +1249,10 @@ void sendMpeZones() {
   midiRPN(0, 6, mpeChannels, 1);
 }
 
-struct MpeSettings *currentMpeSettings = nullptr;
-struct MpeSettings *mpeSettings = nullptr;
+const struct MpeSettings *currentMpeSettings = nullptr;
+const struct MpeSettings *mpeSettings = nullptr;
 
-void applyMpeSettings(struct MpeSettings *settings) {
+void applyMpeSettings(const struct MpeSettings *settings) {
   resetAllControllers();
 
   useDinMidi = (settings->flags & useDinFlag) > 0;
@@ -2610,7 +1359,7 @@ void mpeStop() {
     struct MpeChannelState *state = &mpeState[i];
     if (state->playing) {
       midiReadyWait();
-      endMpeNote(state);
+      endMpeNote(state, state->owner);
 
       midiReadyWait();
       if (doMpeChannelPressure) {
@@ -2632,7 +1381,7 @@ void mpeStop() {
 }
 
 void mpeSetup() {
-  for (int channel = firstMpeChannel; channel < firstMpeChannel + mpeChannels; channel++) {
+  for (uint32_t channel = firstMpeChannel; channel < firstMpeChannel + mpeChannels; channel++) {
     struct MpeChannelState *state = &mpeState[channel];
     state->channel = channel;
     state->playing = false;
@@ -2650,7 +1399,6 @@ void mpeSetup() {
     state->volumeAge = 0xffffffff;
     state->lastBankLsb = 128;
     state->lastBankMsb = 128;
-    state->stealCallback = nullptr;
   }
 
   applyMpeSettings(&mpeSettingsSurgeXT);
@@ -2661,7 +1409,7 @@ void mpeSetup() {
 
 /* Used by MOX8 device preset */
 void mpeCCReset(){
-  for (int channel = firstMpeChannel; channel < firstMpeChannel + mpeChannels; channel++) {
+  for (uint32_t channel = firstMpeChannel; channel < firstMpeChannel + mpeChannels; channel++) {
     midiReadyWait();
     midiControlChange(   1, 127, channel+1); // mod wheel
     midiControlChange(   5,   0, channel+1); // portamento time
@@ -2691,16 +1439,16 @@ void mpeCCReset(){
  * change messages sent, we can send them here.
  */
 
-int idleCount = 0;
+uint32_t idleCount = 0;
 
 void mpeUpdate(uint32_t deltaUsecs) {
   uint16_t channelMask = 0;
-  for (int channel = firstMpeChannel; channel < firstMpeChannel + mpeChannels; channel++) {
+  for (uint32_t channel = firstMpeChannel; channel < firstMpeChannel + mpeChannels; channel++) {
     struct MpeChannelState *state = &mpeState[channel];
     state->age += deltaUsecs;
     if (state->owner == noOne) {
       if (state->playing) {
-        continueMpeNote(state, 0.0f, deltaUsecs);
+        continueMpeNote(state, 0.0f, deltaUsecs, noOne);
       }
     }
 
@@ -2796,7 +1544,7 @@ void mpeUpdate(uint32_t deltaUsecs) {
         }
       } else {
         Serial.println("non-mpe manual multicast, nomulticast " + String(ccs[cc].noMulticast));
-        for (int channel = firstMpeChannel; channel < firstMpeChannel + mpeChannels && !congested; channel++) {
+        for (uint32_t channel = firstMpeChannel; channel < firstMpeChannel + mpeChannels && !congested; channel++) {
           if (((1 << channel) & ccs[cc].dirty) != 0 && !ccs[cc].noMulticast) {
             if (midiReadyLowPriority()) {
               midiControlChange(cc, ccs[cc].value, channel+1);
@@ -2838,6 +1586,18 @@ float lerp(float a, float b, float c){
     return 0.0f;
   } else if (value > 1.0f) {
     return 1.0f;
+  } else {
+    return value;
+  }
+}
+
+float reverseLerp(float a, float b, float c) {
+  float range = c-a;
+  float value = a + b*range;
+  if (value < a) {
+    return a;
+  } else if (value > c) {
+    return c;
   } else {
     return value;
   }
@@ -2947,8 +1707,7 @@ struct Pitch {
 enum KeyState {
   idle,
   playing,
-  releasing,
-  stolen
+  releasing
 };
 
 struct Key {
@@ -2971,11 +1730,11 @@ enum knobState {
 struct Knob {
   Knob() {};
   float max = 8500.0;
-  float min = 300.0;
+  float min = 600.0;
 
   float valueUpperBound = 100.0;
   float valueLowerBound = 0.0;
-  float hysteresis = 600.0;
+  float hysteresis = 800.0;
   uint32_t data = 0;
   float initial = 0.0f;
   enum knobState state = disabled;
@@ -2983,6 +1742,35 @@ struct Knob {
   void (*action)(uint32_t data, float current) = nullptr;
   String label = "";
 };
+
+float filterAmount = 0.5f;
+float resonanceAmount = 0.1;
+float pressureExponent = 0.8f;
+
+void knobVolumeAction(uint32_t cc, float value) {
+  setSynthVolume(value);
+  knobCCAction(cc, value);
+}
+
+void knobModAction(uint32_t cc, float value) {
+  setSynthModulation(value);
+  knobCCAction(cc, value);
+}
+
+void knobFilterAction(uint32_t cc, float value) {
+  filterAmount = value;
+  knobCCAction(cc, value);
+}
+
+void knobResonanceAction(uint32_t cc, float value) {
+  resonanceAmount = value;
+  knobCCAction(cc, value);
+}
+
+void knobReverbAction(uint32_t cc, float value) {
+  setSynthReverb(value);
+  knobCCAction(cc, value);
+}
 
 void knobCCAction(uint32_t cc, float value) {
   if (cc == 74 && doMpePressureFilter) {
@@ -2992,42 +1780,47 @@ void knobCCAction(uint32_t cc, float value) {
 }
 
 void knobVolumeReleaseRateAction(uint32_t unused, float value) {
-  if (value < 0.01f) {
-    value = 0.01f;
+  value = audioTaper(value);
+  if (value < 0.0001f) {
+    value = 0.0001f;
   }
 
   volumeReleaseRate = 0.3f / value;
 }
 
 void knobVolumeAttackRateAction(uint32_t unused, float value) {
-  if (value < 0.01f) {
-    value = 0.01f;
+  value = audioTaper(value);
+
+  if (value < 0.0001f) {
+    value = 0.0001f;
   }
 
-  volumeAttackRate = 0.3f / value;
+  volumeAttackRate = 1.0f / value;
 }
 
 void knobFilterReleaseRateAction(uint32_t unused, float value) {
-  if (value < 0.01f) {
-    value = 0.01f;
+  value = audioTaper(value);
+  if (value < 0.0001f) {
+    value = 0.0001f;
   }
 
   filterReleaseRate = 0.3f / value;
 }
 
 void knobFilterAttackRateAction(uint32_t unused, float value) {
-  if (value < 0.01f) {
-    value = 0.01f;
+  value = audioTaper(value);
+  if (value < 0.0001f) {
+    value = 0.0001f;
   }
 
-  filterAttackRate = 0.3f / value;
+  filterAttackRate = 1.0f / value;
 }
 
 void knobPressureExponentAction(uint32_t unused, float value) {
   value = clamp(value);
 
   float min = 0.25f;
-  float max = 2.0f;
+  float max = 1.5f;
 
   pressureExponent = min + (value * (max - min));
 }
@@ -3103,10 +1896,6 @@ enum SensorType {
 
 enum SensorType sensorType = velostat;
 
-void stealCallback(uint16_t owner) {
-  keys[owner].state = stolen;
-}
-
 void keyUpdate(struct Control* control, uint32_t deltaUsecs) {
   struct Key *key = control->key;
   float pressure = forces[control->bit][control->channel];
@@ -3139,32 +1928,18 @@ void keyUpdate(struct Control* control, uint32_t deltaUsecs) {
     }
   }
 
+  key->intensity = intensity >= 0.0f ? intensity : 0.0f;
+
   if (pressure > 0.01f && (lastPressure > 0.01f || pressure >= 1.0f || !doMpeDynamicVelocity)) {
     switch (key->state) {
       case idle:
       case releasing:
-        if (!beginNote(key->voiceHandle, (double)key->pitch.ratio.a / (double)key->pitch.ratio.b, velocity, intensity, key->index, stealCallback)) {
-          Serial.println("beginNote failed");
-          return;
-        }
-        key->intensity = intensity;
-        key->state = playing;
+        beginNote(key->voiceHandle, (double)key->pitch.ratio.a / (double)key->pitch.ratio.b, velocity, intensity, key->index);
         Serial.println("noteOn " + String(key->pitch.ratio.a) + "/" + String(key->pitch.ratio.b) + " v=" + String(velocity));
+        key->state = playing;
         break;
       case playing:
-        if (key->voiceHandle.stolen(key->index)) {
-          key->state = idle;
-          //key->mpeState = nullptr;
-          break;
-        }
-        key->intensity = intensity;
-        if (!continueNote(key->voiceHandle, intensity, deltaUsecs)) {
-          //key->mpeState->owner = noOne;
-          //key->mpeState = nullptr;
-          key->state = releasing;
-        }
-        break;
-      case stolen:
+        continueNote(key->voiceHandle, intensity, deltaUsecs, key->index);
         break;
     }
   } else if (pressure <= 0.0f && (lastPressure <= 0.0f || !doMpeDynamicVelocity)) {
@@ -3174,26 +1949,12 @@ void keyUpdate(struct Control* control, uint32_t deltaUsecs) {
         break;
       case playing:
         if (delayNoteOff && doMpeDynamicPressure) {
-          key->intensity = intensity;
-          if (!continueNote(key->voiceHandle, intensity, deltaUsecs)) {
-            //key->mpeState->owner = noOne;
-            //key->mpeState = nullptr;
-            key->state = releasing;
-          }
+          continueNote(key->voiceHandle, intensity, deltaUsecs, key->index);
         } else {
-          if (endNote(key->voiceHandle)) {
-            //key->mpeState->owner = noOne;
-            //key->mpeState = nullptr;
-            key->state = releasing;
-          } else {
-            Serial.print("!");
-          }
-          key->intensity = 0.0;
+          continueNote(key->voiceHandle, intensity, deltaUsecs, key->index);
+          endNote(key->voiceHandle, key->index);
+          key->state = releasing;
         }
-        break;
-      case stolen:
-        //key->mpeState = nullptr;
-        key->state = idle;
         break;
     }
   }
@@ -3268,7 +2029,6 @@ void knobUpdate(struct Control* control, uint32_t deltaUsecs) {
   }
 
   float h = (knob->hysteresis * 0.5f) + (knob->hysteresis * (r / knob->max) * 1.0f);  /* readings are less stable in the upper range */
-  bool newval = false;
 
   switch (knob->state) {
     case disabled:
@@ -3295,30 +2055,32 @@ void knobUpdate(struct Control* control, uint32_t deltaUsecs) {
       break;
   }
 
+  bool ascending = false;
+  bool descending = false;
+
   if (r > knob->valueUpperBound) {
-    knob->valueUpperBound = r + (h * 0.10f);
-    knob->valueLowerBound = r - (h * 0.90f);
-    newval = true;
+    knob->valueUpperBound = max(knob->valueUpperBound, r + (h * 0.05f));
+    knob->valueLowerBound = max(knob->valueLowerBound, r - (h * 0.95f));
+    ascending = true;
+  } else if (r < knob->valueLowerBound) {
+    knob->valueLowerBound = min(knob->valueLowerBound, r - (h * 0.05f));
+    knob->valueUpperBound = min(knob->valueUpperBound, r + (h * 0.95f));
+    descending = true;
   }
 
-  if (r < knob->valueLowerBound) {
-    knob->valueLowerBound = r - (h * 0.10f);
-    knob->valueUpperBound = r + (h * 0.90f);
-    newval = true;
-  }
-
-  if (newval) {
-    float current = (r - knob->min) / (knob->max - knob->min);
-    if (current > 1.0f) {
-      current = 1.0f;
-    } else if (current < 0.0f) {
-      current = 0.0f;
+  if (ascending || descending) {
+    if (ascending) {
+      r = (-h * 0.5) + r;
+    } else {
+      r = (h * 0.5) + r;
     }
 
-    Serial.println("knob " + String(knobIndex + 1) + " value " + String(current));
+    float value = clamp((r - knob->min) / (knob->max - knob->min));
+
+    Serial.println("knob " + String(knobIndex + 1) + " value " + String(value));
 
     if (knob->action != nullptr) {
-      knob->action(knob->data, current);
+      knob->action(knob->data, value);
     }
 
     status1TextUpdate(knob->label, 500000);
@@ -3327,15 +2089,6 @@ void knobUpdate(struct Control* control, uint32_t deltaUsecs) {
 
 void scrollUpUpdate(struct Control* control, uint32_t deltaUsecs) {
   check_debounce;
-
-  if (menuStackPos == 0) {
-    return;
-  }
-
-  struct MenuItem* menu = menuStack[menuStackPos - 1];
-  if (menu->childrenExtended == nullptr) {
-    return;
-  }
 
   float force = forces[control->bit][control->channel];
   if (force > 0.0f) {
@@ -3347,15 +2100,6 @@ void scrollUpUpdate(struct Control* control, uint32_t deltaUsecs) {
 void scrollDownUpdate(struct Control* control, uint32_t deltaUsecs) {
   check_debounce;
 
-  if (menuStackPos == 0) {
-    return;
-  }
-
-  struct MenuItem* menu = menuStack[menuStackPos - 1];
-  if (menu->childrenExtended == nullptr) {
-    return;
-  }
-
   float force = forces[control->bit][control->channel];
   if (force > 0.0f) {
     menuScroll(1);
@@ -3364,7 +2108,7 @@ void scrollDownUpdate(struct Control* control, uint32_t deltaUsecs) {
 }
 
 void allNotesOffFast() {
-  for (int channel = firstMpeChannel; channel < firstMpeChannel + mpeChannels; channel++) {
+  for (uint32_t channel = firstMpeChannel; channel < firstMpeChannel + mpeChannels; channel++) {
     while (!midiReady()) {
       delayMicroseconds(100);
     }
@@ -3373,8 +2117,8 @@ void allNotesOffFast() {
 }
 
 void allNotesOffSlow() {
-  for (int channel = firstMpeChannel; channel < firstMpeChannel + mpeChannels; channel++) {
-    for (int note = 0; note < 128; note++) {
+  for (uint32_t channel = firstMpeChannel; channel < firstMpeChannel + mpeChannels; channel++) {
+    for (uint32_t note = 0; note < 128; note++) {
       while (!midiReady()) {
          delayMicroseconds(100);
       }
@@ -3389,7 +2133,7 @@ void allNotesOffSlow() {
 }
 
 void resetAllControllers() {
-  for (int channel = firstMpeChannel; channel < firstMpeChannel + mpeChannels; channel++) {
+  for (uint32_t channel = firstMpeChannel; channel < firstMpeChannel + mpeChannels; channel++) {
     midiReadyWait();
     midiControlChange(121, 0, channel+1);
   }
@@ -3450,14 +2194,7 @@ void statusTextUpdate() {
     output = output + " L";
   }
 
-  windows[statusBar2].text = " " + name + String(octave+4) + " " + type + output;
-  windows[statusBar2].redraw = true;
-}
-
-void status1TextUpdate(String text, uint32_t usecs) {
-  windows[statusBar1].text = text;
-  windows[statusBar1].textUsecs = usecs;
-  windows[statusBar1].redraw = true;
+  setStatusText(" " + name + String(octave+4) + " " + type + output);
 }
 
 void transposeUpdate(struct Control* control, uint32_t deltaUsecs, float transposeAmount) {
@@ -3520,42 +2257,22 @@ void transposeDownSemitoneUpdate(struct Control* control, uint32_t deltaUsecs) {
 }
 
 void editValueIncrementUpdate(struct Control* control, uint32_t deltaUsecs) {
-  if (editItem == nullptr) {
-    return;
-  }
-
   check_debounce;
 
   float force = forces[control->bit][control->channel];
   if (force > 0.0f) {
-    auto val = *(uint32_t*)(editItem->data);
-    if (editItem->maxValue == nullptr || val < *editItem->maxValue) {
-      val++;
-      windows[visualizerWindow].text = String(val);
-      *(uint32_t*)(editItem->data) = val;
-      windows[visualizerWindow].redraw = true;
-      control->delay = (uint32_t)((1.0 - force) * 200000.0);
-    }
+    incrementMenuValue();
+    control->delay = (uint32_t)((1.0 - force) * 200000.0);
   }
 }
 
 void editValueDecrementUpdate(struct Control* control, uint32_t deltaUsecs) {
-  if (editItem == nullptr) {
-    return;
-  }
-
   check_debounce;
 
   float force = forces[control->bit][control->channel];
   if (force > 0.0f) {
-    auto val = *(uint32_t*)(editItem->data);
-    if (editItem->minValue == nullptr || val > *editItem->minValue) {
-      val--;
-      windows[visualizerWindow].text = String(val);
-      *(uint32_t*)(editItem->data) = val;
-      windows[visualizerWindow].redraw = true;
-      control->delay = (uint32_t)((1.0 - force) * 200000.0);
-    }
+    decrementMenuValue();
+    control->delay = (uint32_t)((1.0 - force) * 200000.0);
   }
 }
 
@@ -3672,27 +2389,27 @@ void controlSetupController(uint16_t thresholdPressure, uint16_t maxPressure) {
   controls[7][3].data = 9;
 
   knobs[3].data = 1; /* mod wheel */
-  knobs[3].action = &knobCCAction;
+  knobs[3].action = &knobModAction;
   knobs[3].state = active;
   knobs[3].label = "mod";
 
   knobs[7].data = 74; /* filter cutoff / MPE timbre */
-  knobs[7].action = &knobCCAction;
+  knobs[7].action = &knobFilterAction;
   knobs[7].state = active;
   knobs[7].label = "timbre";
 
   knobs[8].data = 71; /* filter resonance */
-  knobs[8].action = &knobCCAction;
+  knobs[8].action = &knobResonanceAction;
   knobs[8].state = uninitialized;
   knobs[8].label = "resonance";
 
   knobs[9].data = 11; /* expression */
-  knobs[9].action = &knobCCAction;
+  knobs[9].action = &knobVolumeAction;
   knobs[9].state = uninitialized;
   knobs[9].label = "volume";
 
   knobs[6].data = 91; /* reverb send */
-  knobs[6].action = &knobCCAction;
+  knobs[6].action = &knobReverbAction;
   knobs[6].state = uninitialized;
   knobs[6].label = "reverb";
 
@@ -3952,9 +2669,15 @@ bool lastEnableVisualizer = enableVisualizer;
 bool debugShowResistances = false;
 bool debugShowCalibration = false;
 
+float reverbSize = 1.0;
+float reverbHiDamp = 0.3;
+float reverbLoDamp = 0.1;
+float reverbLowPass = 0.2;
+float reverbDiffusion = 1.0;
+
 struct MenuItem allNotesOffSlowMenuItem("notes off", allNotesOffSlowAction);
-struct MenuItem useUsbMenuItem("usb midi", toggle, &useUsbMidi);
-struct MenuItem useDinMenuItem("din5 midi", toggle, &useDinMidi);
+struct MenuItem useUsbMenuItem("usb midi", &useUsbMidi);
+struct MenuItem useDinMenuItem("din5 midi", &useDinMidi);
 struct MenuItem screen10MenuItem("10%", selection, &brightness, 25);
 struct MenuItem screen25MenuItem("25%", selection, &brightness, 63);
 struct MenuItem screen50MenuItem("50%", selection, &brightness, 127);
@@ -3969,36 +2692,43 @@ struct MenuItem pb48MenuItem("4800 cents", selection, &pbRange, 48);
 
 struct MenuItem mpeHandshakeMenuItem("mpe init", mpeHandshakeAction);
 
-struct MenuItem doVelocityMenuItem("velocity", toggle, &doMpeDynamicVelocity);
-struct MenuItem doPressureMenuItem("pressure", toggle, &doMpeDynamicPressure);
-struct MenuItem doVelocityMenuItemTerse("vel", toggle, &doMpeDynamicVelocity);
-struct MenuItem doPressureMenuItemTerse("pre", toggle, &doMpeDynamicPressure);
-struct MenuItem doPolyAfterTouchMenuItem("poly at", toggle, &doMpePolyAfterTouch);
+struct MenuItem doVelocityMenuItem("velocity", &doMpeDynamicVelocity);
+struct MenuItem doPressureMenuItem("pressure", &doMpeDynamicPressure);
+struct MenuItem doVelocityMenuItemTerse("vel", &doMpeDynamicVelocity);
+struct MenuItem doPressureMenuItemTerse("pre", &doMpeDynamicPressure);
+struct MenuItem doPolyAfterTouchMenuItem("poly at", &doMpePolyAfterTouch);
 struct MenuItem pressureBackoffMenuItem("p backoff", value, &pressureBackoff);
-struct MenuItem bendUpOnlyMenuItem("upbend only", toggle, &bendUpOnly);
-struct MenuItem bendDownOnlyMenuItem("dnbend only", toggle, &bendDownOnly);
-struct MenuItem enableBenderMenuItem("bender", toggle, &enableBender);
-struct MenuItem lockMenuItem("lock", toggle, &lock);
+struct MenuItem bendUpOnlyMenuItem("upbend only", &bendUpOnly);
+struct MenuItem bendDownOnlyMenuItem("dnbend only", &bendDownOnly);
+struct MenuItem enableBenderMenuItem("bender", &enableBender);
+struct MenuItem lockMenuItem("lock", &lock);
 
 struct MenuItem mpeBankLsbMenuItem("bank LSB", value, &mpeBankLsb, &mpeBankLsbMin, &mpeBankLsbMax);
 struct MenuItem mpeBankMsbMenuItem("bank MSB", value, &mpeBankMsb, &mpeBankMsbMin, &mpeBankMsbMax);
 
-struct MenuItem debugShowResistancesMenuItem("show res", toggle, &debugShowResistances);
-struct MenuItem debugShowCalibrationMenuItem("show cal", toggle, &debugShowCalibration);
+struct MenuItem debugShowResistancesMenuItem("show res", &debugShowResistances);
+struct MenuItem debugShowCalibrationMenuItem("show cal", &debugShowCalibration);
 
-struct MenuItem unlockBankRangeMenuItem("unlock", toggle, &unlockBankRange);
+struct MenuItem unlockBankRangeMenuItem("unlock", &unlockBankRange);
 struct MenuItem sendETuningTableMenuItem("tx E! tt", sendETuningTableAction);
 
-struct MenuItem doCCPassThroughMenuItem("CC thru", toggle, &doCCPassThrough);
+struct MenuItem doCCPassThroughMenuItem("CC thru", &doCCPassThrough);
 
 struct MenuItem versionMenuItem("fw version", versionAction);
 
 uint32_t zero = 0;
 uint32_t one = 1;
+uint32_t hundred = 100;
 uint32_t maxMidiValue = 127;
 uint32_t maxChannels = 16;
 uint32_t substitutions = subDefault;
 uint32_t substitutionsActive = subDefault;
+
+#include <synth_waveform.h>
+
+//int synthWaveform = WAVEFORM_SAWTOOTH;
+int synthWaveform = WAVEFORM_TRIANGLE_VARIABLE;
+
 
 struct MenuItem pressureCCMenuItem("pressure CC", value, &pressureCC, &zero, &maxMidiValue);
 struct MenuItem mpeProgramChangeMenuItem("patch", value, &programChange, &zero, &maxMidiValue);
@@ -4037,7 +2767,7 @@ struct MenuItem maxPressureMenuItem("max p", value, &maxMpePressure, &zero, &max
 struct MenuItem minPressureMenuItem("min p", value, &minMpePressure, &zero, &maxMidiValue);
 
 struct MenuItem* outputMenuItems[] = {&useUsbMenuItem, &useDinMenuItem, &outputPresetsMenu, &mpeHandshakeMenuItem, &mpeChannelsMenuItem, &pbRangeMenu, &pressureCCMenuItem, &maxPressureMenuItem, &minPressureMenuItem, &minVelocityMenuItem, &doCCPassThroughMenuItem};
-struct MenuItem outputMenu("output", submenu, &outputMenuItems[0], 11);
+struct MenuItem outputMenu("midi", submenu, &outputMenuItems[0], 11);
 
 struct MenuItem sub7_11MenuItem("7/4->11/8", selection, &substitutions, sub7_11);
 struct MenuItem swap5_7MenuItem("5:7 swap", selection, &substitutions, swap5_7);
@@ -4054,10 +2784,30 @@ struct MenuItem screenBrightnessMenu("brightness", submenu, &screen10MenuItem, &
 struct MenuItem interfaceMenu("interface", submenu, &screenBrightnessMenu, &visualizerMenuItem);
 struct MenuItem patchesMenu("patches", submenu, &mpeBankMsbMenuItem,  &mpeBankLsbMenuItem, &mpeProgramChangeMenuItem, &unlockBankRangeMenuItem);
 
+struct MenuItem sawMenuItem("sawtooth", selection, &synthWaveform, WAVEFORM_BANDLIMIT_SAWTOOTH);
+struct MenuItem trileanMenuItem("skew", selection, &synthWaveform, WAVEFORM_TRIANGLE_VARIABLE);
+struct MenuItem triMenuItem("triangle", selection, &synthWaveform, WAVEFORM_TRIANGLE);
+struct MenuItem pulseMenuItem("pulse", selection, &synthWaveform, WAVEFORM_BANDLIMIT_PULSE);
+struct MenuItem squareMenuItem("square", selection, &synthWaveform, WAVEFORM_BANDLIMIT_SQUARE);
+struct MenuItem sineMenuItem("sine", selection, &synthWaveform, WAVEFORM_SINE);
+
+struct MenuItem reverbSizeMenuItem("size", &reverbSize);
+struct MenuItem reverbHiDampMenuItem("high damp", &reverbHiDamp);
+struct MenuItem reverbLoDampMenuItem("low damp", &reverbLoDamp);
+struct MenuItem reverbLowPassMenuItem("low pass", &reverbLowPass);
+struct MenuItem reverbDiffusionMenuItem("diffusion", &reverbDiffusion);
+
+struct MenuItem* waveformMenuItems[] = {&sawMenuItem, &trileanMenuItem, &triMenuItem, &sineMenuItem, &squareMenuItem, &pulseMenuItem};
+
+struct MenuItem oscillatorMenu("oscillator", submenu, waveformMenuItems, 6);
+struct MenuItem reverbMenu("reverb", submenu, &reverbSizeMenuItem, &reverbHiDampMenuItem, &reverbLoDampMenuItem, &reverbLowPassMenuItem, &reverbDiffusionMenuItem);
+
+struct MenuItem synthMenu("synth", submenu, &oscillatorMenu, &reverbMenu);
+
 struct MenuItem* debugMenuItems[] = {&versionMenuItem, &debugShowResistancesMenuItem, &debugShowCalibrationMenuItem, &noteOnFirstMenuItem, &bendUpOnlyMenuItem, &bendDownOnlyMenuItem, &lockMenuItem};
 struct MenuItem debugMenu("debug", submenu, &debugMenuItems[0], 7);
 
-struct MenuItem configMenu("settings", submenu, &outputMenu, &controlsMenu, &interfaceMenu, &debugMenu);
+struct MenuItem configMenu("settings", submenu, &outputMenu, &controlsMenu, &interfaceMenu, &synthMenu, &debugMenu);
 
 struct MenuItem rootMenu("", submenu, &configMenu, &patchesMenu, &emptyMenuItem, &emptyMenuItem, &allNotesOffSlowMenuItem);
 
@@ -4309,7 +3059,7 @@ void loop() {
         lastEnableVisualizer = true;
       } else {
         if (!enableVisualizer && lastEnableVisualizer) {
-          windows[visualizerWindow].redraw = true;
+          redrawVisualizer();
           lastEnableVisualizer = false;
         }
       }
@@ -4336,6 +3086,7 @@ void loop() {
     delayMicroseconds(1000);
   }
 
+  synthUpdate(delta);
   mpeUpdate(delta);
 
   if (substitutions != substitutionsActive) {
@@ -4384,8 +3135,8 @@ void loop() {
     }
 
     /* todo: only set if the value changes */
-    leds.setPixel(5, surplus);
-    leds.show();
+    setLed(5, surplus);
+    showLeds();
   }
 
   canUpdate();
@@ -4441,6 +3192,15 @@ void loop() {
     renderScreen(screenRedrawAge);
     screenRedrawAge = 0;
   }
+
+  /*
+  if (verbose && true) {
+    Serial.println("MIDI channel state:");
+    for (int i=0; i < 16; i++) {
+      struct MpeChannelState *chan = &mpeState[i];
+      Serial.println("playing: " + String(chan->playing) + " vol: " + String(chan->volume) + " age: " + String(chan->age));
+    }
+  } */
 
   if (verbose) {
     Serial.println(String("MIDI Sent: ") + midiMsgsSent + " received: " + midiMsgsReceived + " vol release rate " + String(volumeReleaseRate) + " pressure exponent " + String(pressureExponent) + " pb +/- " + String(pbUp) + "  " + String(pbDown));
