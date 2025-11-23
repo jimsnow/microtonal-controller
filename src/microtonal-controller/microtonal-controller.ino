@@ -18,7 +18,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 */
 
-#define fwversion "1.1.1"
+#define fwversion "1.1.2"
 
 #define hwversion 4
 
@@ -150,8 +150,24 @@ float resistanceToForce(float r, float area = 1.0f) {
 
 const int maxShiftRegisterBits = 8+32;
 
-/* Screen */
+/* Audio */
 
+#include <synth_waveform.h>
+#define WAVEFORM_NONE 1000
+
+int synthWaveform1 = WAVEFORM_SAWTOOTH;
+int synthWaveform2 = WAVEFORM_NONE;
+int synthWaveform3 = WAVEFORM_NONE;
+float synthWaveform2offset = 1.5f;
+float synthWaveform3offset = 0.5f;
+float synthWaveform2level = 0.5f;
+float synthWaveform2Level = 0.5f;
+bool doStringSynth = false;
+bool doSubtractiveSynth = true;
+float stringSynthPluck = 1.0f;
+float stringSynthDrive = 0.0f;
+float stringSynthRegen = 0.9f;
+float stringSynthRegenScale = 1.0f;
 
 /* Menu */
 
@@ -192,9 +208,6 @@ uint32_t brightnessSet = 255;
 
 struct MenuItem emptyMenuItem = MenuItem("", empty);
 
-/* CAN BUS */
-
-
 /* MIDI */
 
 bool useUsbMidi = true;
@@ -209,8 +222,6 @@ struct MidiLocalSettings : public MIDI_NAMESPACE::DefaultSettings {
 };
 
 MIDI_CREATE_CUSTOM_INSTANCE(HardwareSerial, Serial5, dinMidi, MidiLocalSettings);
-
-//MIDI_CREATE_INSTANCE(HardwareSerial, Serial5, dinMidi);
 
 uint64_t midiMsgsSent = 0;
 uint64_t midiMsgsReceived = 0;
@@ -492,6 +503,7 @@ struct MpeChannelState *getMpeChannel() {
 }
 
 #define middleC 60 // midi note number for C4
+#define middleCFrequency 261.63f
 
 uint32_t pbRange = 2;  // could use float, but int is more compatible with MIDI pitch bend range configuration
 uint32_t pressureCC = 128;
@@ -512,16 +524,18 @@ float volumeAttackRate = 1000000.0f;
 float filterReleaseRate = 2.0f;
 float filterAttackRate = 1000000.0f;
 
+double inverseLog2 = 1.0 / log(2.0);
+
 double pitchToCents(double pitch) {
-  return (log(pitch) / log(2.0)) * 1200.0;
+  return log(pitch) * inverseLog2 * 1200.0;
 }
 
 double pitchToOctaves(double pitch) {
-  return (log(pitch) / log(2.0));
+  return log(pitch) * inverseLog2;
 }
 
 double centsToPitch(double cents) {
-  const double factor = pow(2.0, (1.0/1200.0));
+  static const double factor = pow(2.0, (1.0/1200.0));
   return pow(factor, cents);
 }
 
@@ -562,7 +576,7 @@ bool unlockBankRange = false;
 bool unlockBankRangeSet = unlockBankRange;
 enum midiType midiType = mpe;
 
-double masterPbUpRange = 3.0/2.0;
+double masterPbUpRange = 2.0/1.0;
 double masterPbDownRange = 1.0/2.0;  // 2.0/3.0;
 
 uint32_t masterPbAge = 0;
@@ -708,6 +722,7 @@ bool bendDownOnly = false;
 bool enableBender = true;
 
 struct MpeChannelState *beginMpeNote(double pitch, double velocity, double pressure, uint16_t owner) {
+  Serial.println("beginMpeNote");
 
   uint32_t v = (int) (1.0 + (velocity*126));
   if (v > 127) {
@@ -1908,8 +1923,8 @@ void keyUpdate(struct Control* control, uint32_t deltaUsecs) {
   if (doMpeDynamicVelocity) {
     float delta = pressure - lastPressure;
     velocity = delta > 0
-      ? pow( ( delta * 8000.0f) / (float)deltaUsecs, 0.3f)
-      : pow( (-delta * 8000.0f) / (float)deltaUsecs, 0.3f);
+      ? pow( ( delta * 12000.0f) / (float)deltaUsecs, 0.2f)
+      : pow( (-delta * 12000.0f) / (float)deltaUsecs, 0.2f);
     if (velocity > 1.0f) {
       velocity = 1.0f;
     } else if (velocity < 0.0f) {
@@ -1932,8 +1947,12 @@ void keyUpdate(struct Control* control, uint32_t deltaUsecs) {
 
   if (pressure > 0.01f && (lastPressure > 0.01f || pressure >= 1.0f || !doMpeDynamicVelocity)) {
     switch (key->state) {
-      case idle:
       case releasing:
+        if (delayNoteOff && doMpeDynamicPressure) {
+          endNote(key->voiceHandle, key->index);
+        }
+        /* fall through */
+      case idle:
         beginNote(key->voiceHandle, (double)key->pitch.ratio.a / (double)key->pitch.ratio.b, velocity, intensity, key->index);
         Serial.println("noteOn " + String(key->pitch.ratio.a) + "/" + String(key->pitch.ratio.b) + " v=" + String(velocity));
         key->state = playing;
@@ -1942,14 +1961,17 @@ void keyUpdate(struct Control* control, uint32_t deltaUsecs) {
         continueNote(key->voiceHandle, intensity, deltaUsecs, key->index);
         break;
     }
-  } else if (pressure <= 0.0f && (lastPressure <= 0.0f || !doMpeDynamicVelocity)) {
+  } else if (pressure <= 0.0f) {
     switch (key->state) {
       case idle:
+        break;
       case releasing:
+        continueNote(key->voiceHandle, intensity, deltaUsecs, key->index);
         break;
       case playing:
         if (delayNoteOff && doMpeDynamicPressure) {
           continueNote(key->voiceHandle, intensity, deltaUsecs, key->index);
+          key->state = releasing;
         } else {
           continueNote(key->voiceHandle, intensity, deltaUsecs, key->index);
           endNote(key->voiceHandle, key->index);
@@ -2724,12 +2746,6 @@ uint32_t maxChannels = 16;
 uint32_t substitutions = subDefault;
 uint32_t substitutionsActive = subDefault;
 
-#include <synth_waveform.h>
-
-//int synthWaveform = WAVEFORM_SAWTOOTH;
-int synthWaveform = WAVEFORM_TRIANGLE_VARIABLE;
-
-
 struct MenuItem pressureCCMenuItem("pressure CC", value, &pressureCC, &zero, &maxMidiValue);
 struct MenuItem mpeProgramChangeMenuItem("patch", value, &programChange, &zero, &maxMidiValue);
 struct MenuItem mpeChannelsMenuItem("channels", value, &mpeChannels, &zero, &maxChannels);
@@ -2784,12 +2800,22 @@ struct MenuItem screenBrightnessMenu("brightness", submenu, &screen10MenuItem, &
 struct MenuItem interfaceMenu("interface", submenu, &screenBrightnessMenu, &visualizerMenuItem);
 struct MenuItem patchesMenu("patches", submenu, &mpeBankMsbMenuItem,  &mpeBankLsbMenuItem, &mpeProgramChangeMenuItem, &unlockBankRangeMenuItem);
 
-struct MenuItem sawMenuItem("sawtooth", selection, &synthWaveform, WAVEFORM_BANDLIMIT_SAWTOOTH);
-struct MenuItem trileanMenuItem("skew", selection, &synthWaveform, WAVEFORM_TRIANGLE_VARIABLE);
-struct MenuItem triMenuItem("triangle", selection, &synthWaveform, WAVEFORM_TRIANGLE);
-struct MenuItem pulseMenuItem("pulse", selection, &synthWaveform, WAVEFORM_BANDLIMIT_PULSE);
-struct MenuItem squareMenuItem("square", selection, &synthWaveform, WAVEFORM_BANDLIMIT_SQUARE);
-struct MenuItem sineMenuItem("sine", selection, &synthWaveform, WAVEFORM_SINE);
+struct MenuItem sawMenuItem("sawtooth", selection, &synthWaveform1, WAVEFORM_BANDLIMIT_SAWTOOTH);
+struct MenuItem trileanMenuItem("skew", selection, &synthWaveform1, WAVEFORM_TRIANGLE_VARIABLE);
+struct MenuItem triMenuItem("triangle", selection, &synthWaveform1, WAVEFORM_TRIANGLE);
+struct MenuItem pulseMenuItem("pulse", selection, &synthWaveform1, WAVEFORM_BANDLIMIT_PULSE);
+struct MenuItem squareMenuItem("square", selection, &synthWaveform1, WAVEFORM_BANDLIMIT_SQUARE);
+struct MenuItem sineMenuItem("sine", selection, &synthWaveform1, WAVEFORM_SINE);
+struct MenuItem oscillatorOffMenuItem("none", selection, &synthWaveform1, WAVEFORM_NONE);
+struct MenuItem oscillatorEnableMenuItem("enable", toggle, &doSubtractiveSynth);
+
+struct MenuItem* waveformMenuItems[] = {&oscillatorEnableMenuItem, &sawMenuItem, &trileanMenuItem, &triMenuItem, &sineMenuItem, &squareMenuItem, &pulseMenuItem, &oscillatorOffMenuItem};
+
+struct MenuItem pluckMenuItem("pluck", &stringSynthPluck);
+struct MenuItem stringSynthDriveMenuItem("drive", &stringSynthDrive);
+struct MenuItem stringSynthRegenMenuItem("regen", &stringSynthRegen);
+struct MenuItem stringSynthRegenScalingMenuItem("regen scale", &stringSynthRegenScale);
+struct MenuItem stringSynthEnableMenuItem("enable", toggle, &doStringSynth);
 
 struct MenuItem reverbSizeMenuItem("size", &reverbSize);
 struct MenuItem reverbHiDampMenuItem("high damp", &reverbHiDamp);
@@ -2797,12 +2823,11 @@ struct MenuItem reverbLoDampMenuItem("low damp", &reverbLoDamp);
 struct MenuItem reverbLowPassMenuItem("low pass", &reverbLowPass);
 struct MenuItem reverbDiffusionMenuItem("diffusion", &reverbDiffusion);
 
-struct MenuItem* waveformMenuItems[] = {&sawMenuItem, &trileanMenuItem, &triMenuItem, &sineMenuItem, &squareMenuItem, &pulseMenuItem};
-
-struct MenuItem oscillatorMenu("oscillator", submenu, waveformMenuItems, 6);
+struct MenuItem oscillator1Menu("subtractive", submenu, waveformMenuItems, 8);
+struct MenuItem stringSynthMenu("Kar+Strong", submenu, &stringSynthEnableMenuItem, &pluckMenuItem, &stringSynthDriveMenuItem, &stringSynthRegenMenuItem, &stringSynthRegenScalingMenuItem);
 struct MenuItem reverbMenu("reverb", submenu, &reverbSizeMenuItem, &reverbHiDampMenuItem, &reverbLoDampMenuItem, &reverbLowPassMenuItem, &reverbDiffusionMenuItem);
 
-struct MenuItem synthMenu("synth", submenu, &oscillatorMenu, &reverbMenu);
+struct MenuItem synthMenu("synth", submenu, &oscillator1Menu, &reverbMenu, &stringSynthMenu);
 
 struct MenuItem* debugMenuItems[] = {&versionMenuItem, &debugShowResistancesMenuItem, &debugShowCalibrationMenuItem, &noteOnFirstMenuItem, &bendUpOnlyMenuItem, &bendDownOnlyMenuItem, &lockMenuItem};
 struct MenuItem debugMenu("debug", submenu, &debugMenuItems[0], 7);
@@ -2888,6 +2913,8 @@ void showResistances() {
 void setup() {
   serialSetup();
   Serial.println("begin setup");
+  //Serial.println("initializing storage...");
+  //storageSetup();
   Serial.println("initializing LEDs...");
   ledSetup();
   Serial.println("initializing ADCs...");
@@ -3204,6 +3231,7 @@ void loop() {
 
   if (verbose) {
     Serial.println(String("MIDI Sent: ") + midiMsgsSent + " received: " + midiMsgsReceived + " vol release rate " + String(volumeReleaseRate) + " pressure exponent " + String(pressureExponent) + " pb +/- " + String(pbUp) + "  " + String(pbDown));
+    Serial.println("Audio Memoory max blocks used: " + String(AudioMemoryUsageMax()));
   }
   iteration++;
 }

@@ -377,7 +377,7 @@ void menuSelect(struct MenuItem *item, uint16_t button) {
     editItem = item;
     windows[visualizerWindow].redraw = true;
   } else if (item->type == floatValue) {
-    windows[visualizerWindow].text = String(*(float*)(item->data));
+    windows[visualizerWindow].text = String(*(float*)(item->data), 3);
     windows[visualizerWindow].enabled = true;
     editItem = item;
     windows[visualizerWindow].redraw = true;
@@ -573,7 +573,7 @@ void incrementFloatValue() {
   if (val < 1.0f) {
     val += 0.005;
     val = clamp(val);
-    windows[visualizerWindow].text = String(val);
+    windows[visualizerWindow].text = String(val, 3);
     *(float*)(editItem->data) = val;
     windows[visualizerWindow].redraw = true;
   }
@@ -585,7 +585,7 @@ void decrementFloatValue() {
   if (val > 0.0f) {
     val -= 0.005;
     val = clamp(val);
-    windows[visualizerWindow].text = String(val);
+    windows[visualizerWindow].text = String(val, 3);
     *(float*)(editItem->data) = val;
     windows[visualizerWindow].redraw = true;
   }

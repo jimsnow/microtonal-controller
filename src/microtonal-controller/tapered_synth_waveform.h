@@ -32,7 +32,6 @@
 #include <arm_math.h>    // github.com/PaulStoffregen/cores/blob/master/teensy4/arm_math.h
 #include <synth_waveform.h>
 
-
 class TaperedAudioSynthWaveform : public AudioStream
 {
 public:

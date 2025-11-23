@@ -77,6 +77,9 @@ struct MenuItem {
       case value:
         highlight = editItem == this;
         break;
+      case floatValue:
+        highlight = editItem == this;
+        break;
       default:
         highlight = false;
         break;

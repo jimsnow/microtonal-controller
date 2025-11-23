@@ -25,17 +25,19 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <SerialFlash.h>
 #include "tapered_synth_waveform.h"
 #include "effect_platervbstereo.h"
+#include "synth_karplusstronger.h"
 
 #define synthVoices 16
 #define mixers ((synthVoices+3)/4)  /* each of the first-level mixers take up to 4 inputs */
 
 // GUItool: begin automatically generated code
-TaperedAudioSynthWaveform       waveform[synthVoices];      //xy=106.33336639404297,53.3333683013916
-AudioSynthKarplusStrong  string[synthVoices];
+TaperedAudioSynthWaveform  waveform[synthVoices];      //xy=106.33336639404297,53.3333683013916
+AudioSynthKarplusStronger  string[synthVoices];
 AudioFilterBiquad        biquad[synthVoices];        //xy=263.33333587646484,54.33335304260254
 AudioMixer4              mixer[mixers];         //xy=418.33334159851074,74.33335876464844
 AudioMixer4              perVoiceMixer[synthVoices];
 AudioSynthWaveformSine   sine1;          //xy=419.3333435058594,285.33337020874023
+AudioSynthNoiseWhite     noise;
 AudioMixer4              mixer4;         //xy=611.333381652832,178.33335494995117
 //AudioEffectReverb        reverb1;        //xy=707.3333854675293,61.3333854675293
 //AudioEffectFreeverb      reverb1;
@@ -52,6 +54,7 @@ AudioConnection          patchCord7(sine1, 0, mixerR, 2);
 
 AudioConnection          perVoiceMixerPatchCord[synthVoices] = {};
 AudioConnection          stringPatchCord[synthVoices] = {};
+AudioConnection          noiseConnection[synthVoices] = {};
 
 //AudioConnection          pc1(waveform[0], 0, mixer[3], 0);
 //AudioConnection          pc2(waveform[1], 0, mixer[3], 1);
@@ -97,7 +100,8 @@ struct SynthVoice {
   float pitch; // relative to 1:1
   float frequency;  // in hz, as of when the note began
   float filterAmount;
-  AudioSynthKarplusStrong *string;
+  AudioSynthKarplusStronger *string;
+  int lastSynthWaveform1;
 };
 
 struct SynthVoice voices[synthVoices] = {};
@@ -162,6 +166,9 @@ void setSynthPitchBend(float pitch) {
     struct SynthVoice *voice = &voices[v];
     if (voice->volume > 0.0f) {
       voice->osc->frequency(pitch * voice->frequency);
+
+      /* setting frequency on Karplus-Strong oscillator seems not to be implemented yet */
+      //voice->string->frequency(pitch * voice->frequency);
     }
   }
   AudioInterrupts();
@@ -204,8 +211,10 @@ void setVoiceVolume(struct SynthVoice *voice, float volume, uint32_t deltaUsecs)
   }
 
   AudioNoInterrupts();
-  voice->osc->amplitude(audioTaper(volume) * synthOscillatorMaxVolume * modValue);
-  voice->volume = volume;
+  if (doSubtractiveSynth && synthWaveform1 != WAVEFORM_NONE) {
+    voice->osc->amplitude(audioTaper(volume) * synthOscillatorMaxVolume * modValue);
+    voice->volume = volume;
+  }
   AudioInterrupts();
 }
 
@@ -230,18 +239,23 @@ void setVoiceFilterMod(struct SynthVoice *voice, float pressure, uint32_t deltaU
 
 struct SynthVoice *getSynthVoice(uint16_t owner) {
   int best = 0;
-  float bestVolume = 1.0f;
+  float bestVolume = 2.0f;
   for (int v = 0; v < synthVoices; v++) {
-    Serial.println("getSynthVoice voice " + String(v) + " volume " + String(voices[v].volume));
-    if (voices[v].volume < bestVolume) {
+    float volume = voices[v].volume;
+    if (voices[v].string->isPlaying()) {
+      volume += 1.0f;
+    }
+
+    //Serial.println("getSynthVoice voice " + String(v) + " volume " + String(volume));
+    if (volume < bestVolume) {
       best = v;
-      bestVolume = voices[v].volume;
-      Serial.println("bestVolume is " + String(bestVolume));
+      bestVolume = volume;
+
     }
   }
   voices[best].owner = owner;
 
-  Serial.println("most idle synth voice " + String(best) + " volume " + String(bestVolume));
+  //Serial.println("most idle synth voice " + String(best) + " volume " + String(bestVolume));
   return &voices[best];
 }
 
@@ -254,12 +268,24 @@ struct SynthVoice *beginSynthNote(double pitch, float velocity, float pressure, 
   voice->osc->frequency(voice->frequency * bend);
 
   AudioNoInterrupts();
-  voice->osc->begin(synthWaveform);
+  if (synthWaveform1 == WAVEFORM_NONE) {
+    voice->volume = 0.0f;
+  } else {
+    if (doSubtractiveSynth && synthWaveform1 != voice->lastSynthWaveform1) {
+      voice->osc->begin(synthWaveform1);
+      voice->lastSynthWaveform1 = synthWaveform1;
+    }
+  }
+
+  if (doStringSynth) {
+    voice->string->setFeedbackLevel(stringSynthRegen, (voice->frequency - middleCFrequency) * stringSynthRegenScale + middleCFrequency);
+    voice->string->noteOn(voice->frequency * bend, audioTaper(velocity) * stringSynthPluck);
+  }
+
   AudioInterrupts();
 
   setVoiceVolume(voice, pressure, 100);
   setVoiceFilterMod(voice, pressure, 100);
-  //voice->string->noteOn(voice->pitch * bend * pitchReferenceHz(), audioTaper(velocity));
 
   return voice;
 }
@@ -271,6 +297,8 @@ void continueSynthNote(struct SynthVoice* voice, float pressure, uint32_t deltaU
   //Serial.println("setting synth volume " + String(pressure));
   setVoiceVolume(voice, pressure, deltaUsecs);
   setVoiceFilterMod(voice, pressure, deltaUsecs);
+
+  voice->string->setDriveLevel(pressure*stringSynthDrive);
   return;
 }
 
@@ -279,7 +307,7 @@ void endSynthNote(struct SynthVoice* voice, uint16_t owner) {
     return;
   }
   voice->owner = noOne;
-  //voice->string->noteOff(0.5f);
+  voice->string->noteOff(0.5f);
 }
 
 void synthSetup() {
@@ -293,8 +321,9 @@ void synthSetup() {
     patchCord2[v].connect(biquad[v], 0, perVoiceMixer[v], 0);
     perVoiceMixer[v].gain(0, 1.0f);
     stringPatchCord[v].connect(string[v], 0, perVoiceMixer[v], 1);
-    perVoiceMixer[v].gain(1, 0.3f);
+    perVoiceMixer[v].gain(1, 1.0f);
     perVoiceMixerPatchCord[v].connect(perVoiceMixer[v], 0, mixer[m], port);
+    noiseConnection[v].connect(noise, 0, string[v], 1);
 
     //patchCord2[v].connect(biquad[v], 0, mixer[m], port);
 
@@ -307,17 +336,17 @@ void synthSetup() {
     voices[v].age = 0xffffffff;
     voices[v].volume = 0.0f;
     voices[v].string = &string[v];
+    //voices[v].string->setFeedbackLevel(0.999);
 
-    voices[v].osc->begin(0.0f, 440.0f, WAVEFORM_SAWTOOTH);
+    if (synthWaveform1 != WAVEFORM_NONE) {
+      voices[v].osc->begin(0.0f, 440.0f, synthWaveform1);
+    }
     voices[v].filter->setLowpass(0, 800.0f, 0.1f);
   }
 
 
   // doesn't actually affect volume
   sgtl5000_1.volume(1.0);
-    
-  //reverb1.roomsize(1.0f);
-  //reverb1.damping(0.9f);
 
   reverb1.size(reverbSize);
   reverb1.lowpass(reverbLowPass);
@@ -342,6 +371,12 @@ float lastReverbDiffusion = reverbDiffusion;
 void synthUpdate(uint32_t deltaUsecs) {
   if (!doLocalSynth) {
     return;
+  }
+
+  if (doStringSynth) {
+    noise.amplitude(0.02f);
+  } else {
+    noise.amplitude(0.0f);
   }
 
   setSynthPitchBend(calculatePitchBend(pbUp, pbDown));
@@ -379,11 +414,21 @@ void synthUpdate(uint32_t deltaUsecs) {
     reverb1.diffusion(reverbDiffusion);
     lastReverbDiffusion = reverbDiffusion;
   }
+
+  /* "drive" doesn't work unless the voice's volume is > 0.0f */
+  if (stringSynthDrive > 0.0f && stringSynthPluck < 0.001f) {
+    stringSynthPluck = 0.001f;
+  }
+
+  if (stringSynthDrive == 0.0f && stringSynthPluck < 0.001f) {
+    stringSynthPluck = 0.0f;
+  }
+
   AudioInterrupts();
 }
 
 void audioSetup() {
-  AudioMemory(40);
+  AudioMemory(400);  /* Karplus-Strong bass notes use a lot of memory. */
   AudioNoInterrupts();
   synthSetup();
   /* a440 test tone */
@@ -402,4 +447,3 @@ void setPitchReference(double freq) {
   sine1.amplitude(0.0f);
   AudioInterrupts();
 }
-
