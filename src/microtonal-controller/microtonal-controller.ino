@@ -18,7 +18,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 */
 
-#define fwversion "1.1.2"
+#define fwversion "1.1.3"
 
 #define hwversion 4
 
@@ -168,6 +168,8 @@ float stringSynthPluck = 1.0f;
 float stringSynthDrive = 0.0f;
 float stringSynthRegen = 0.9f;
 float stringSynthRegenScale = 1.0f;
+float stringSynthBrightness = 0.8f;
+float stringSynthBrightnessCorrection = 0.12f;
 
 /* Menu */
 
@@ -2813,9 +2815,13 @@ struct MenuItem* waveformMenuItems[] = {&oscillatorEnableMenuItem, &sawMenuItem,
 
 struct MenuItem pluckMenuItem("pluck", &stringSynthPluck);
 struct MenuItem stringSynthDriveMenuItem("drive", &stringSynthDrive);
+struct MenuItem stringSynthBrightnessMenuItem("brightness", &stringSynthBrightness);
 struct MenuItem stringSynthRegenMenuItem("regen", &stringSynthRegen);
 struct MenuItem stringSynthRegenScalingMenuItem("regen scale", &stringSynthRegenScale);
 struct MenuItem stringSynthEnableMenuItem("enable", toggle, &doStringSynth);
+struct MenuItem stringSynthBrightnessCorrectionMenuItem("correction", &stringSynthBrightnessCorrection);
+
+struct MenuItem* stringSynthMenuItems[] = {&stringSynthEnableMenuItem, &pluckMenuItem, &stringSynthDriveMenuItem, &stringSynthBrightnessMenuItem, &stringSynthRegenMenuItem, &stringSynthRegenScalingMenuItem, &stringSynthBrightnessCorrectionMenuItem};
 
 struct MenuItem reverbSizeMenuItem("size", &reverbSize);
 struct MenuItem reverbHiDampMenuItem("high damp", &reverbHiDamp);
@@ -2824,7 +2830,7 @@ struct MenuItem reverbLowPassMenuItem("low pass", &reverbLowPass);
 struct MenuItem reverbDiffusionMenuItem("diffusion", &reverbDiffusion);
 
 struct MenuItem oscillator1Menu("subtractive", submenu, waveformMenuItems, 8);
-struct MenuItem stringSynthMenu("Kar+Strong", submenu, &stringSynthEnableMenuItem, &pluckMenuItem, &stringSynthDriveMenuItem, &stringSynthRegenMenuItem, &stringSynthRegenScalingMenuItem);
+struct MenuItem stringSynthMenu("Kar+Strong", submenu, &stringSynthMenuItems[0], 7);
 struct MenuItem reverbMenu("reverb", submenu, &reverbSizeMenuItem, &reverbHiDampMenuItem, &reverbLoDampMenuItem, &reverbLowPassMenuItem, &reverbDiffusionMenuItem);
 
 struct MenuItem synthMenu("synth", submenu, &oscillator1Menu, &reverbMenu, &stringSynthMenu);

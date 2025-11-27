@@ -56,14 +56,19 @@ public:
 	void noteOff(float velocity); 
 	bool isPlaying(void) { return state != silent; }
 	bool isStarted(void) { return state == playing; } // stimulus has been generated
+  void brightness(float level) {
+    if (level > 1.0f) {
+      level = 1.0f;
+    } else if (level < 0.0f) {
+      level = 0.0f;
+    }
+
+    feedback_in = level * 0x10000;
+    feedback_prior = (1.0f - level) * 0x10000;
+  }
 	void setFeedbackLevel(float level, float frequency) {
     //float scale = frequency / 261.63f; /* relative to middle C */
   
-    /*
-    if (scale > 1.0f) {
-      scale *= 100;
-    } */
-
     float levelSquare = level * level;
 
     float sustain = (levelSquare * levelSquare) * 1000.0f; //* scale;
@@ -169,6 +174,8 @@ private:
 			int32_t sampleCount;	// number of samples in those blocks
 	} theBuffer;
 	int16_t _feedbackLevel;
+  int32_t feedback_in = 0xe000;
+  int32_t feedback_prior = 0x2000;
 	int16_t _driveLevel;
 	float maxBend;
 	uint32_t modulation_factor;

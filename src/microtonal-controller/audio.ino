@@ -32,6 +32,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 // GUItool: begin automatically generated code
 TaperedAudioSynthWaveform  waveform[synthVoices];      //xy=106.33336639404297,53.3333683013916
+AudioSynthWaveformDc       fm[synthVoices];
 AudioSynthKarplusStronger  string[synthVoices];
 AudioFilterBiquad        biquad[synthVoices];        //xy=263.33333587646484,54.33335304260254
 AudioMixer4              mixer[mixers];         //xy=418.33334159851074,74.33335876464844
@@ -39,8 +40,6 @@ AudioMixer4              perVoiceMixer[synthVoices];
 AudioSynthWaveformSine   sine1;          //xy=419.3333435058594,285.33337020874023
 AudioSynthNoiseWhite     noise;
 AudioMixer4              mixer4;         //xy=611.333381652832,178.33335494995117
-//AudioEffectReverb        reverb1;        //xy=707.3333854675293,61.3333854675293
-//AudioEffectFreeverb      reverb1;
 AudioEffectPlateReverb   reverb1;
 AudioMixer4              mixerL;         //xy=841.3333892822266,185.33335494995117
 AudioMixer4              mixerR;
@@ -55,23 +54,7 @@ AudioConnection          patchCord7(sine1, 0, mixerR, 2);
 AudioConnection          perVoiceMixerPatchCord[synthVoices] = {};
 AudioConnection          stringPatchCord[synthVoices] = {};
 AudioConnection          noiseConnection[synthVoices] = {};
-
-//AudioConnection          pc1(waveform[0], 0, mixer[3], 0);
-//AudioConnection          pc2(waveform[1], 0, mixer[3], 1);
-//AudioConnection          pc3(waveform[2], 0, mixer[3], 2);
-//AudioConnection          pc4(waveform[3], 0, mixer[3], 3);
-
-//AudioConnection          pcmm1(mixer[0], 0, mixer4, 0);
-//AudioConnection          pcmm2(mixer[1], 0, mixer4, 1);
-//AudioConnection          pcmm3(mixer[2], 0, mixer4, 2);
-//AudioConnection          pcmm4(mixer[3], 0, mixer4, 3);
-
-//AudioConnection          patchCord1(waveform1, biquad1);
-//AudioConnection          patchCord2(biquad1, 0, mixer1, 0);
-//AudioConnection          patchCord3(mixer1, 0, mixer4, 0);
-//AudioConnection          patchCord4(mixer3, 0, mixer4, 2);
-//AudioConnection          patchCord5(mixer2, 0, mixer4, 1);
-//AudioConnection          patchCord6(sine1, 0, mixer4, 3);
+AudioConnection          perVoiceFMPatchCord[synthVoices] = {};
 
 AudioConnection          patchCord8(mixer4, reverb1);
 AudioConnection          patchCord9(mixer4, 0, mixerL, 1);
@@ -162,14 +145,14 @@ void setVoiceFilter(struct SynthVoice* voice, float keyAmount, float knobAmount,
 
 void setSynthPitchBend(float pitch) {
   AudioNoInterrupts();
+  float fmValue = pitchToOctaves(pitch);
+  //Serial.println("pitch bend set to " + String(fmValue));
   for (int v = 0; v < synthVoices; v++) {
     struct SynthVoice *voice = &voices[v];
     if (voice->volume > 0.0f) {
       voice->osc->frequency(pitch * voice->frequency);
-
-      /* setting frequency on Karplus-Strong oscillator seems not to be implemented yet */
-      //voice->string->frequency(pitch * voice->frequency);
     }
+    fm[v].amplitude(fmValue, 1.0f);  /* 1ms slew */
   }
   AudioInterrupts();
 }
@@ -259,6 +242,21 @@ struct SynthVoice *getSynthVoice(uint16_t owner) {
   return &voices[best];
 }
 
+/*
+ * I'm using a modified version of the Karplus-Strong oscillator that has a "brightness" control that
+ * affects how much low-pass filter is applied.  Unfortunately, the filter affects the pitch, so we
+ * have to apply a correction factor before passing the frequency in to noteOn...
+ */
+float brightnessCorrection(float frequency) {
+  #if 1
+    float sharpness = stringSynthBrightness - 0.5f;
+    float sensitivity = frequency/middleCFrequency;
+    return 1.0f - (sharpness * stringSynthBrightnessCorrection * 0.1f * sensitivity);
+  #else
+    return 1.0f;
+  #endif
+}
+
 struct SynthVoice *beginSynthNote(double pitch, float velocity, float pressure, uint16_t owner) {
   struct SynthVoice* voice = getSynthVoice(owner);
 
@@ -279,7 +277,9 @@ struct SynthVoice *beginSynthNote(double pitch, float velocity, float pressure, 
 
   if (doStringSynth) {
     voice->string->setFeedbackLevel(stringSynthRegen, (voice->frequency - middleCFrequency) * stringSynthRegenScale + middleCFrequency);
-    voice->string->noteOn(voice->frequency * bend, audioTaper(velocity) * stringSynthPluck);
+    voice->string->brightness(stringSynthBrightness);
+    //voice->string->setFeedbackLevel(stringSynthRegen, stringSynthBrightness);
+    voice->string->noteOn(voice->frequency * brightnessCorrection(voice->frequency), audioTaper(velocity) * stringSynthPluck);  /* ignore bend here, as it's already factored in via the fm input */
   }
 
   AudioInterrupts();
@@ -324,6 +324,8 @@ void synthSetup() {
     perVoiceMixer[v].gain(1, 1.0f);
     perVoiceMixerPatchCord[v].connect(perVoiceMixer[v], 0, mixer[m], port);
     noiseConnection[v].connect(noise, 0, string[v], 1);
+    perVoiceFMPatchCord[v].connect(fm[v], 0, string[v], 0);
+    fm[v].amplitude(0.0f);
 
     //patchCord2[v].connect(biquad[v], 0, mixer[m], port);
 
@@ -336,7 +338,7 @@ void synthSetup() {
     voices[v].age = 0xffffffff;
     voices[v].volume = 0.0f;
     voices[v].string = &string[v];
-    //voices[v].string->setFeedbackLevel(0.999);
+    voices[v].string->frequencyModulation(1.0f);  /* set bend range to 1 octave */
 
     if (synthWaveform1 != WAVEFORM_NONE) {
       voices[v].osc->begin(0.0f, 440.0f, synthWaveform1);
@@ -367,6 +369,8 @@ float lastReverbHiDamp = reverbHiDamp;
 float lastReverbLoDamp = reverbLoDamp;
 float lastReverbLowPass = reverbLowPass;
 float lastReverbDiffusion = reverbDiffusion;
+float lastPBUp = pbUp;
+float lastPBDown = pbDown;
 
 void synthUpdate(uint32_t deltaUsecs) {
   if (!doLocalSynth) {
@@ -379,7 +383,12 @@ void synthUpdate(uint32_t deltaUsecs) {
     noise.amplitude(0.0f);
   }
 
-  setSynthPitchBend(calculatePitchBend(pbUp, pbDown));
+  if (lastPBUp != pbUp || lastPBDown != pbDown) {
+    setSynthPitchBend(calculatePitchBend(pbUp, pbDown));
+    lastPBUp = pbUp;
+    lastPBDown = pbDown;
+  }
+
   updateModulationValue();
   AudioNoInterrupts();
   for (int v=0; v < synthVoices; v++) {

@@ -163,7 +163,7 @@ void AudioSynthKarplusStronger::setLevel(float level,int16_t* levelPtr)
 {
 	if (level > 1.0f) level = 1.0f;
 	if (level < 0.0f) level = 0.0f;
-	*levelPtr = (int16_t) (level * 32767);
+	*levelPtr = (int16_t) (level * 32767);  // was 32767
 }
 
 
@@ -238,6 +238,9 @@ void AudioSynthKarplusStronger::update(void)
 	if (nullptr != input)
 		drive = input->data;
 
+  int32_t fbk_prior = (_feedbackLevel * feedback_prior) >> 15;
+  int32_t fbk_in = (_feedbackLevel * feedback_in) >> 15;
+
 	// if just started, provide the initial stimulus		
 	if (state == started) 
 	{
@@ -252,7 +255,7 @@ void AudioSynthKarplusStronger::update(void)
 		{
 			int16_t prior = theBuffer[bufferIndex - increment]; // frequency fixed at "baseLen" samples
 			int16_t in = theBuffer[bufferIndex - baseLen];
-			int16_t out = (in * _feedbackLevel + prior * _feedbackLevel) >> 16;
+			int16_t out = (in * fbk_in + prior * fbk_prior) >> 16;
 			if (nullptr != drive)
 				out += (*drive++ * _driveLevel) >> 16;
 			*data++ = out;
@@ -275,12 +278,12 @@ void AudioSynthKarplusStronger::update(void)
 			int16_t out = (in * _feedbackLevel + prior * _feedbackLevel) >> 16;
 			/*/
 			// using DSP - slight loss of precision
-			int32_t fbk = _feedbackLevel;
-			int32_t out = signed_multiply_32x16b(fbk,in);
-			out = signed_multiply_accumulate_32x16b(out,fbk,prior);
+
+			int32_t out = signed_multiply_32x16b(fbk_in,in);
+			out = signed_multiply_accumulate_32x16b(out,fbk_prior,prior);
 			//*/
 			if (nullptr != drive)
-				out += (*drive++ * _driveLevel) >> 16;
+				out += (*drive++ * _driveLevel) >> 15;
 			*data++ = out;
 			theBuffer[bufferIndex] = out; // store feedback data for next cycle
 			bufferIndex += increment;
