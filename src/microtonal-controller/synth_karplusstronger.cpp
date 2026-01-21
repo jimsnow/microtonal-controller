@@ -24,7 +24,6 @@
  * THE SOFTWARE.
  */
 
-#include <Arduino.h>
 #include "synth_karplusstronger.h"
 
 //=============================================================================
@@ -43,8 +42,58 @@ static uint32_t pseudorand(uint32_t lo)
 #endif
 
 
-uint32_t AudioSynthKarplusStronger::IndexableBuffer::seed = 1;
-bool AudioSynthKarplusStronger::IndexableBuffer::allocate(uint16_t count)
+//=============================================================================
+void AudioSynthKarplusStronger::update(void)
+{
+#if defined(KINETISK) || defined(__IMXRT1062__)
+	audio_block_t *block;
+
+	if (state == 0) return;
+
+	if (state == 1) {
+		uint32_t lo = seed;
+		for (int i=0; i < bufferLen; i++) {
+			lo = pseudorand(lo);
+			buffer[i] = signed_multiply_32x16b(magnitude, lo);
+		}
+		seed = lo;
+		state = 2;
+	}
+
+	block = allocate();
+	if (!block) {
+		state = 0;
+		return;
+	}
+
+	int16_t prior;
+	if (bufferIndex > 0) {
+		prior = buffer[bufferIndex - 1];
+	} else {
+		prior = buffer[bufferLen - 1];
+	}
+	int16_t *data = block->data;
+	for (int i=0; i < AUDIO_BLOCK_SAMPLES; i++) {
+		int16_t in = buffer[bufferIndex];
+	//int16_t out = (in * 32604 + prior * 32604) >> 16;
+		int16_t out = (in * 32686 + prior * 32686) >> 16;
+		//int16_t out = (in * 32768 + prior * 32768) >> 16;
+		*data++ = out;
+		buffer[bufferIndex] = out;
+		prior = in;
+		if (++bufferIndex >= bufferLen) bufferIndex = 0;
+	}
+
+	transmit(block);
+	release(block); 
+#endif
+}
+uint32_t AudioSynthKarplusStronger::seed = 1;
+
+
+//=============================================================================
+uint32_t AudioSynthKarplusStrongerModulated::IndexableBuffer::seed = 1;
+bool AudioSynthKarplusStrongerModulated::IndexableBuffer::allocate(uint16_t count)
 {
 	bool result = true;
 	size_t i;
@@ -71,7 +120,7 @@ bool AudioSynthKarplusStronger::IndexableBuffer::allocate(uint16_t count)
 }
 
 
-void AudioSynthKarplusStronger::IndexableBuffer::release(size_t start)
+void AudioSynthKarplusStrongerModulated::IndexableBuffer::release(size_t start)
 {
 	size_t i;
 
@@ -92,7 +141,7 @@ void AudioSynthKarplusStronger::IndexableBuffer::release(size_t start)
 }
 
 
-void AudioSynthKarplusStronger::IndexableBuffer::prefill(int samples, int32_t magnitude)
+void AudioSynthKarplusStrongerModulated::IndexableBuffer::prefill(int samples, int32_t magnitude)
 {
 	uint32_t lo = seed;
 
@@ -114,7 +163,7 @@ void AudioSynthKarplusStronger::IndexableBuffer::prefill(int samples, int32_t ma
 
 
 //=============================================================================
-void AudioSynthKarplusStronger::noteOn(float noteFreq, float velocity) 
+void AudioSynthKarplusStrongerModulated::noteOn(float noteFreq, float velocity) 
 {
 	int bufferNum;
 	int32_t bufferLen;
@@ -140,7 +189,7 @@ void AudioSynthKarplusStronger::noteOn(float noteFreq, float velocity)
 	bufferNum = bufferLen / AUDIO_BLOCK_SAMPLES + 1; // one cycle, rounded up
 	
 	// actual number of samples for requested note
-	baseLen = AUDIO_SAMPLE_RATE_EXACT*increment / noteFreq - increment;
+	baseLen = AUDIO_SAMPLE_RATE_EXACT*increment / noteFreq - increment/2;
 	
 	if (!theBuffer.allocate(bufferNum)) // couldn't allocate, stay silent
 		theBuffer.release();
@@ -152,18 +201,17 @@ void AudioSynthKarplusStronger::noteOn(float noteFreq, float velocity)
 }
 
 
-void AudioSynthKarplusStronger::noteOff(float velocity) 
+void AudioSynthKarplusStrongerModulated::noteOff(float velocity) 
 {
 	if (state > silent)
 		state = releasing; // prevent click at end
 }
 
 
-void AudioSynthKarplusStronger::setLevel(float level,int16_t* levelPtr)
+void AudioSynthKarplusStrongerModulated::setLevel(float level,int32_t* levelPtr)
 {
-	if (level > 1.0f) level = 1.0f;
-	if (level < 0.0f) level = 0.0f;
-	*levelPtr = (int16_t) (level * 32767);  // was 32767
+	int32_t lev = (int32_t) (level * 32768.0f * (float) lvMul) - 1;
+	*levelPtr = (lev < 0)?0:lev;
 }
 
 
@@ -174,7 +222,7 @@ void AudioSynthKarplusStronger::setLevel(float level,int16_t* levelPtr)
  * Compute a list of period intervals into phasedata[], 
  * adjusted by the bend data supplied in bend[]
  */
-void AudioSynthKarplusStronger::computeBendData(uint32_t* phasedata, int16_t* bp)
+void AudioSynthKarplusStrongerModulated::computeBendData(uint32_t* phasedata, int16_t* bp)
 {
 	for (int i=0; i < AUDIO_BLOCK_SAMPLES; i++) 
 	{
@@ -208,7 +256,7 @@ void AudioSynthKarplusStronger::computeBendData(uint32_t* phasedata, int16_t* bp
 
 
 //-----------------------------------------------------------------------------
-void AudioSynthKarplusStronger::update(void)
+void AudioSynthKarplusStrongerModulated::update(void)
 {
 #if defined(KINETISK) || defined(__IMXRT1062__)
 	audio_block_t *block, *input, *bend;
@@ -235,11 +283,8 @@ void AudioSynthKarplusStronger::update(void)
 	// prepare audio data pointers, in and out
 	int16_t *data = block->data;
 	int16_t* drive = nullptr;
-	if (nullptr != input)
+	if (nullptr != input && 0 != _driveLevel)
 		drive = input->data;
-
-  int32_t fbk_prior = (_feedbackLevel * feedback_prior) >> 15;
-  int32_t fbk_in = (_feedbackLevel * feedback_in) >> 15;
 
 	// if just started, provide the initial stimulus		
 	if (state == started) 
@@ -249,17 +294,23 @@ void AudioSynthKarplusStronger::update(void)
 	}
 
 	// finally, create new audio data
+	int32_t fbkIn    = _feedbackLevelIn;
+	int32_t fbkPrior = _feedbackLevelPrior;
 	if (nullptr == bend) // no bend, just compute it
 	{
 		for (int i=0; i < AUDIO_BLOCK_SAMPLES; i++) 
 		{
-			int16_t prior = theBuffer[bufferIndex - increment]; // frequency fixed at "baseLen" samples
-			int16_t in = theBuffer[bufferIndex - baseLen];
-			int16_t out = (in * fbk_in + prior * fbk_prior) >> 16;
+			int16_t in, prior;
+			theBuffer.read2samples(bufferIndex - baseLen, prior, in);
+
+			// using DSP - slight loss of precision but faster execution
+			int32_t out = signed_multiply_32x16b(fbkIn,in);
+			out = signed_multiply_accumulate_32x16b(out,fbkPrior,prior);
+
 			if (nullptr != drive)
-				out += (*drive++ * _driveLevel) >> 16;
-			*data++ = out;
-			theBuffer[bufferIndex] = out; // store feedback data for next cycle
+				out = signed_multiply_accumulate_32x16b(out, _driveLevel, *drive++);
+			*data++ = out/lvMul;
+			theBuffer[bufferIndex] = out/lvMul; // store feedback data for next cycle
 			bufferIndex += increment;
 		}
 	}
@@ -271,21 +322,19 @@ void AudioSynthKarplusStronger::update(void)
 		release(bend);
 		for (int i=0; i < AUDIO_BLOCK_SAMPLES; i++) 
 		{
-			int16_t prior = theBuffer[bufferIndex - increment]; 
+      int16_t prior = theBuffer[bufferIndex - increment]; 
 			int16_t in = theBuffer[bufferIndex - perData[i]]; // frequency modulated by input
-			/*
-			// original computation
-			int16_t out = (in * _feedbackLevel + prior * _feedbackLevel) >> 16;
-			/*/
-			// using DSP - slight loss of precision
+			//int16_t in, prior;
+			//theBuffer.read2samples(bufferIndex - perData[i], prior, in);
 
-			int32_t out = signed_multiply_32x16b(fbk_in,in);
-			out = signed_multiply_accumulate_32x16b(out,fbk_prior,prior);
-			//*/
+			// using DSP - slight loss of precision but faster execution
+			int32_t out = signed_multiply_32x16b(fbkIn,in);
+			out = signed_multiply_accumulate_32x16b(out,fbkPrior,prior);
+
 			if (nullptr != drive)
-				out += (*drive++ * _driveLevel) >> 15;
-			*data++ = out;
-			theBuffer[bufferIndex] = out; // store feedback data for next cycle
+				out = signed_multiply_accumulate_32x16b(out, _driveLevel, *drive++);
+			*data++ = out/lvMul;
+			theBuffer[bufferIndex] = out/lvMul; // store feedback data for next cycle
 			bufferIndex += increment;
 		}
 	}

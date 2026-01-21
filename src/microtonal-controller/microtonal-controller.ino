@@ -18,7 +18,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 */
 
-#define fwversion "1.1.3"
+#define fwversion "1.1.4"
 
 #define hwversion 4
 
@@ -154,14 +154,11 @@ const int maxShiftRegisterBits = 8+32;
 
 #include <synth_waveform.h>
 #define WAVEFORM_NONE 1000
+#define oscillators 3
 
-int synthWaveform1 = WAVEFORM_SAWTOOTH;
-int synthWaveform2 = WAVEFORM_NONE;
-int synthWaveform3 = WAVEFORM_NONE;
-float synthWaveform2offset = 1.5f;
-float synthWaveform3offset = 0.5f;
-float synthWaveform2level = 0.5f;
-float synthWaveform2Level = 0.5f;
+int synthWaveform[oscillators] = {WAVEFORM_BANDLIMIT_SAWTOOTH, WAVEFORM_NONE, WAVEFORM_NONE};
+float synthWaveformOffset[oscillators] = {1.0f, 1.5f, 0.5f};
+float synthWaveformLevel[oscillators] = {1.0f, 0.75f, 0.75f};
 bool doStringSynth = false;
 bool doSubtractiveSynth = true;
 float stringSynthPluck = 1.0f;
@@ -169,7 +166,8 @@ float stringSynthDrive = 0.0f;
 float stringSynthRegen = 0.9f;
 float stringSynthRegenScale = 1.0f;
 float stringSynthBrightness = 0.8f;
-float stringSynthBrightnessCorrection = 0.12f;
+//float stringSynthBrightnessCorrection = 0.12f;
+float stringSynthBrightnessCorrection = 0.06f;
 
 /* Menu */
 
@@ -1259,6 +1257,7 @@ const struct MpeSettings mpeSettingsPhatty  = {monovoice,    1,   2,  1000, 19, 
 const struct MpeSettings mpeSettingsDx7E    = {tuningtable,  1,   1,  1000, 128, 0,  0,   0,  0,  0,   0,  nullptr, useDinFlag | useETuningTableFlag | noPressureFlag};
 const struct MpeSettings mpeSettingsDexed   = {tuningtable,  1,   1,  1000, 128, 0,  0,   0,  0,  0,   0,  nullptr, useUsbFlag | noPressureFlag };
 const struct MpeSettings mpeSettingsQSynth  = {multitimbral, 16,  2,  1000, 11,  0,  0,   0,  0,  0,   0,  nullptr, useUsbFlag | skipChannel10Flag | minVelocity32Flag};
+const struct MpeSettings mpeSettingsPianoteq = {multitimbral, 16, 2,  1000, 7,   0,  0,   0,  0,  0,   0,  nullptr, useUsbFlag | noPressureFlag };
 
 
 void sendMpeZones() {
@@ -2688,6 +2687,10 @@ void versionAction(void *data) {
   status1TextUpdate(fwversion, 2000000);
 }
 
+void saveAction(void *data) {
+  saveAllSettings("settings");
+}
+
 bool enableVisualizer = false;
 bool lastEnableVisualizer = enableVisualizer;
 bool debugShowResistances = false;
@@ -2768,17 +2771,19 @@ struct MenuItem phattyPresetMenuItem("Slim Phatty", selection, &mpeSettings, (ui
 struct MenuItem dexedPresetMenuItem("Dexed", selection, &mpeSettings, (uint32_t)&mpeSettingsDexed);
 struct MenuItem qSynthPresetMenuItem("QSynth", selection, &mpeSettings, (uint32_t)&mpeSettingsQSynth);
 struct MenuItem mt2PresetMenuItem("MT v2", selection, &mpeSettings, (uint32_t)&mpeSettingsMT2);
+struct MenuItem pianoteqMenuItem("Pianoteq", selection, &mpeSettings, (uint32_t)&mpeSettingsPianoteq);
 
 struct MenuItem arturiaMenu("Arturia", submenu, &kspPresetMenuItem);
 struct MenuItem befacoMenu("Befaco", submenu, &mt2PresetMenuItem);
 struct MenuItem emuMenu("E-mu", submenu, &proteus2000PresetMenuItem);
 struct MenuItem korgMenu("Korg", submenu, &sp300PresetMenuItem, &trinityPresetMenuItem, &x50PresetMenuItem);
+struct MenuItem modarttMenu("Modartt", submenu, &pianoteqMenuItem);
 struct MenuItem moogMenu("Moog", submenu, &phattyPresetMenuItem);
 struct MenuItem rolandMenu("Roland", submenu, &rd300PresetMenuItem, &xv2020PresetMenuItem);
 struct MenuItem yamahaMenu("Yamaha", submenu, &dx7EPresetMenuItem, &fb01PresetMenuItem, &moxPresetMenuItem);
 
-struct MenuItem* brandsMenu[] = {&arturiaMenu, &befacoMenu, &dexedPresetMenuItem, &emuMenu, &korgMenu, &moogMenu, &rolandMenu, &surgeXtPresetMenuItem, &qSynthPresetMenuItem, &yamahaMenu};
-struct MenuItem outputPresetsMenu("dev presets", submenu, &brandsMenu[0], 10);
+struct MenuItem* brandsMenu[] = {&arturiaMenu, &befacoMenu, &dexedPresetMenuItem, &emuMenu, &korgMenu, &modarttMenu, &moogMenu, &rolandMenu, &surgeXtPresetMenuItem, &qSynthPresetMenuItem, &yamahaMenu};
+struct MenuItem outputPresetsMenu("dev presets", submenu, &brandsMenu[0], 11);
 struct MenuItem pbRangeMenu("bend range", submenu, &pb2MenuItem, &pb7MenuItem, &pb12MenuItem, &pb24MenuItem, &pb48MenuItem);
 struct MenuItem noteOnFirstMenuItem("note-on 1st", toggle, &noteOnFirst);
 struct MenuItem maxPressureMenuItem("max p", value, &maxMpePressure, &zero, &maxMidiValue);
@@ -2802,16 +2807,36 @@ struct MenuItem screenBrightnessMenu("brightness", submenu, &screen10MenuItem, &
 struct MenuItem interfaceMenu("interface", submenu, &screenBrightnessMenu, &visualizerMenuItem);
 struct MenuItem patchesMenu("patches", submenu, &mpeBankMsbMenuItem,  &mpeBankLsbMenuItem, &mpeProgramChangeMenuItem, &unlockBankRangeMenuItem);
 
-struct MenuItem sawMenuItem("sawtooth", selection, &synthWaveform1, WAVEFORM_BANDLIMIT_SAWTOOTH);
-struct MenuItem trileanMenuItem("skew", selection, &synthWaveform1, WAVEFORM_TRIANGLE_VARIABLE);
-struct MenuItem triMenuItem("triangle", selection, &synthWaveform1, WAVEFORM_TRIANGLE);
-struct MenuItem pulseMenuItem("pulse", selection, &synthWaveform1, WAVEFORM_BANDLIMIT_PULSE);
-struct MenuItem squareMenuItem("square", selection, &synthWaveform1, WAVEFORM_BANDLIMIT_SQUARE);
-struct MenuItem sineMenuItem("sine", selection, &synthWaveform1, WAVEFORM_SINE);
-struct MenuItem oscillatorOffMenuItem("none", selection, &synthWaveform1, WAVEFORM_NONE);
-struct MenuItem oscillatorEnableMenuItem("enable", toggle, &doSubtractiveSynth);
+struct MenuItem saw1menuItem("sawtooth", selection, &synthWaveform[0], WAVEFORM_BANDLIMIT_SAWTOOTH);
+struct MenuItem trilean1menuItem("skew", selection, &synthWaveform[0], WAVEFORM_TRIANGLE_VARIABLE);
+struct MenuItem tri1menuItem("triangle", selection, &synthWaveform[0], WAVEFORM_TRIANGLE);
+struct MenuItem pulse1menuItem("pulse", selection, &synthWaveform[0], WAVEFORM_BANDLIMIT_PULSE);
+struct MenuItem square1menuItem("square", selection, &synthWaveform[0], WAVEFORM_BANDLIMIT_SQUARE);
+struct MenuItem sine1menuItem("sine", selection, &synthWaveform[0], WAVEFORM_SINE);
+struct MenuItem oscillatorOff1menuItem("none", selection, &synthWaveform[0], WAVEFORM_NONE);
 
-struct MenuItem* waveformMenuItems[] = {&oscillatorEnableMenuItem, &sawMenuItem, &trileanMenuItem, &triMenuItem, &sineMenuItem, &squareMenuItem, &pulseMenuItem, &oscillatorOffMenuItem};
+struct MenuItem saw2menuItem("sawtooth", selection, &synthWaveform[1], WAVEFORM_BANDLIMIT_SAWTOOTH);
+struct MenuItem trilean2menuItem("skew", selection, &synthWaveform[1], WAVEFORM_TRIANGLE_VARIABLE);
+struct MenuItem tri2menuItem("triangle", selection, &synthWaveform[1], WAVEFORM_TRIANGLE);
+struct MenuItem pulse2menuItem("pulse", selection, &synthWaveform[1], WAVEFORM_BANDLIMIT_PULSE);
+struct MenuItem square2menuItem("square", selection, &synthWaveform[1], WAVEFORM_BANDLIMIT_SQUARE);
+struct MenuItem sine2menuItem("sine", selection, &synthWaveform[1], WAVEFORM_SINE);
+struct MenuItem oscillatorOff2menuItem("none", selection, &synthWaveform[1], WAVEFORM_NONE);
+
+struct MenuItem saw3menuItem("sawtooth", selection, &synthWaveform[2], WAVEFORM_BANDLIMIT_SAWTOOTH);
+struct MenuItem trilean3menuItem("skew", selection, &synthWaveform[2], WAVEFORM_TRIANGLE_VARIABLE);
+struct MenuItem tri3menuItem("triangle", selection, &synthWaveform[2], WAVEFORM_TRIANGLE);
+struct MenuItem pulse3menuItem("pulse", selection, &synthWaveform[2], WAVEFORM_BANDLIMIT_PULSE);
+struct MenuItem square3menuItem("square", selection, &synthWaveform[2], WAVEFORM_BANDLIMIT_SQUARE);
+struct MenuItem sine3menuItem("sine", selection, &synthWaveform[2], WAVEFORM_SINE);
+struct MenuItem oscillatorOff3menuItem("none", selection, &synthWaveform[2], WAVEFORM_NONE);
+
+struct MenuItem* waveform1menuItems[] = {&saw1menuItem, &trilean1menuItem, &tri1menuItem, &sine1menuItem, &square1menuItem, &pulse1menuItem, &oscillatorOff1menuItem};
+struct MenuItem* waveform2menuItems[] = {&saw2menuItem, &trilean2menuItem, &tri2menuItem, &sine2menuItem, &square2menuItem, &pulse2menuItem, &oscillatorOff2menuItem};
+struct MenuItem* waveform3menuItems[] = {&saw3menuItem, &trilean3menuItem, &tri3menuItem, &sine3menuItem, &square3menuItem, &pulse3menuItem, &oscillatorOff3menuItem};
+
+struct MenuItem subtractiveEnableMenuItem("enable", toggle, &doSubtractiveSynth);
+
 
 struct MenuItem pluckMenuItem("pluck", &stringSynthPluck);
 struct MenuItem stringSynthDriveMenuItem("drive", &stringSynthDrive);
@@ -2829,18 +2854,25 @@ struct MenuItem reverbLoDampMenuItem("low damp", &reverbLoDamp);
 struct MenuItem reverbLowPassMenuItem("low pass", &reverbLowPass);
 struct MenuItem reverbDiffusionMenuItem("diffusion", &reverbDiffusion);
 
-struct MenuItem oscillator1Menu("subtractive", submenu, waveformMenuItems, 8);
+struct MenuItem oscillator1Menu("osc1", submenu, waveform1menuItems, 7);
+struct MenuItem oscillator2Menu("osc2", submenu, waveform2menuItems, 7);
+struct MenuItem oscillator3Menu("osc3", submenu, waveform3menuItems, 7);
+
+struct MenuItem subtractiveMenu("subtractive", submenu, &subtractiveEnableMenuItem, &oscillator1Menu, &oscillator2Menu, &oscillator3Menu);
+
 struct MenuItem stringSynthMenu("Kar+Strong", submenu, &stringSynthMenuItems[0], 7);
 struct MenuItem reverbMenu("reverb", submenu, &reverbSizeMenuItem, &reverbHiDampMenuItem, &reverbLoDampMenuItem, &reverbLowPassMenuItem, &reverbDiffusionMenuItem);
 
-struct MenuItem synthMenu("synth", submenu, &oscillator1Menu, &reverbMenu, &stringSynthMenu);
+struct MenuItem synthMenu("synth", submenu, &subtractiveMenu, &reverbMenu, &stringSynthMenu);
 
 struct MenuItem* debugMenuItems[] = {&versionMenuItem, &debugShowResistancesMenuItem, &debugShowCalibrationMenuItem, &noteOnFirstMenuItem, &bendUpOnlyMenuItem, &bendDownOnlyMenuItem, &lockMenuItem};
 struct MenuItem debugMenu("debug", submenu, &debugMenuItems[0], 7);
 
 struct MenuItem configMenu("settings", submenu, &outputMenu, &controlsMenu, &interfaceMenu, &synthMenu, &debugMenu);
 
-struct MenuItem rootMenu("", submenu, &configMenu, &patchesMenu, &emptyMenuItem, &emptyMenuItem, &allNotesOffSlowMenuItem);
+struct MenuItem saveMenuItem("save", saveAction);
+
+struct MenuItem rootMenu("", submenu, &configMenu, &patchesMenu, &emptyMenuItem, &saveMenuItem, &allNotesOffSlowMenuItem);
 
 void menuSetup() {
   menuSelect(&rootMenu, 0);
@@ -2848,6 +2880,40 @@ void menuSetup() {
   patchesMenu.addOption(&doVelocityMenuItemTerse, 0);
   patchesMenu.addOption(&doPressureMenuItemTerse, 2);
 }
+
+/* Storage */
+
+#include "storage.h"
+
+#define i32Setting(var) addSetting(#var, subsystem, I32, &var)
+#define fltSetting(var) addSetting(#var, subsystem, Flt, &var)
+#define bSetting(var) addSetting(#var, subsystem, I1, &var)
+
+void storedVariableSetup() {
+
+  Subsystem subsystem = Synth;
+  addSetting("reverbSize", Synth, Flt, &reverbSize);
+
+  i32Setting(synthWaveform[0]);
+  i32Setting(synthWaveform[1]);
+  i32Setting(synthWaveform[2]);
+  fltSetting(synthWaveformOffset[1]);
+  fltSetting(synthWaveformOffset[2]);
+  fltSetting(synthWaveformLevel[1]);
+  fltSetting(synthWaveformLevel[2]);
+  bSetting(doStringSynth);
+  bSetting(doSubtractiveSynth);
+  fltSetting(stringSynthPluck);
+  fltSetting(stringSynthDrive);
+  fltSetting(stringSynthBrightness);
+  fltSetting(stringSynthRegen);
+  fltSetting(stringSynthRegenScale);
+  fltSetting(stringSynthBrightnessCorrection);
+
+  loadSettings("settings");
+}
+
+/* Utility */
 
 void printWidth12(const char* str) {
   char buf[13];
@@ -2916,11 +2982,13 @@ void showResistances() {
   }
 }
 
+/* Setup */
+
 void setup() {
   serialSetup();
   Serial.println("begin setup");
-  //Serial.println("initializing storage...");
-  //storageSetup();
+  Serial.println("initializing storage...");
+  storageSetup();
   Serial.println("initializing LEDs...");
   ledSetup();
   Serial.println("initializing ADCs...");
@@ -2938,6 +3006,8 @@ void setup() {
   Serial.println("initializing menu...");
   menuSetup();
   statusTextUpdate();
+  Serial.println("initializing stored variable");
+  storedVariableSetup();
   Serial.println("initializing audio DAC...");
   audioSetup();
   Serial.println("initializing keybed...");
