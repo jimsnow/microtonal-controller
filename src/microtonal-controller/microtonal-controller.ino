@@ -18,7 +18,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 */
 
-#define fwversion "1.1.4"
+#define fwversion "1.1.5"
 
 #define hwversion 4
 
@@ -2206,18 +2206,18 @@ void statusTextUpdate() {
 
   String output = "";
   if (useUsbMidi) {
-    output = output + " usb";
+    output = output + " \\usb";
   }
 
   if (useDinMidi) {
-    output = output + " din5";
+    output = output + " \\din5";
   }
 
   if (lock) {
-    output = output + " L";
+    output = output + " \\lock";
   }
 
-  setStatusText(" " + name + String(octave+4) + " " + type + output);
+  setStatusText(name + String(octave+4), type, output);
 }
 
 void transposeUpdate(struct Control* control, uint32_t deltaUsecs, float transposeAmount) {
@@ -2414,7 +2414,7 @@ void controlSetupController(uint16_t thresholdPressure, uint16_t maxPressure) {
   knobs[3].data = 1; /* mod wheel */
   knobs[3].action = &knobModAction;
   knobs[3].state = active;
-  knobs[3].label = "mod";
+  knobs[3].label = "modulation";
 
   knobs[7].data = 74; /* filter cutoff / MPE timbre */
   knobs[7].action = &knobFilterAction;
@@ -2691,6 +2691,10 @@ void saveAction(void *data) {
   saveAllSettings("settings");
 }
 
+void fontTestAction(void*data) {
+  fontTest();
+}
+
 bool enableVisualizer = false;
 bool lastEnableVisualizer = enableVisualizer;
 bool debugShowResistances = false;
@@ -2702,9 +2706,9 @@ float reverbLoDamp = 0.1;
 float reverbLowPass = 0.2;
 float reverbDiffusion = 1.0;
 
-struct MenuItem allNotesOffSlowMenuItem("notes off", allNotesOffSlowAction);
-struct MenuItem useUsbMenuItem("usb midi", &useUsbMidi);
-struct MenuItem useDinMenuItem("din5 midi", &useDinMidi);
+struct MenuItem allNotesOffSlowMenuItem("all notes off", allNotesOffSlowAction);
+struct MenuItem useUsbMenuItem("usb midi output", &useUsbMidi);
+struct MenuItem useDinMenuItem("din5 midi output", &useDinMidi);
 struct MenuItem screen10MenuItem("10%", selection, &brightness, 25);
 struct MenuItem screen25MenuItem("25%", selection, &brightness, 63);
 struct MenuItem screen50MenuItem("50%", selection, &brightness, 127);
@@ -2721,27 +2725,28 @@ struct MenuItem mpeHandshakeMenuItem("mpe init", mpeHandshakeAction);
 
 struct MenuItem doVelocityMenuItem("velocity", &doMpeDynamicVelocity);
 struct MenuItem doPressureMenuItem("pressure", &doMpeDynamicPressure);
-struct MenuItem doVelocityMenuItemTerse("vel", &doMpeDynamicVelocity);
-struct MenuItem doPressureMenuItemTerse("pre", &doMpeDynamicPressure);
-struct MenuItem doPolyAfterTouchMenuItem("poly at", &doMpePolyAfterTouch);
-struct MenuItem pressureBackoffMenuItem("p backoff", value, &pressureBackoff);
+//struct MenuItem doVelocityMenuItemTerse("vel", &doMpeDynamicVelocity);
+//struct MenuItem doPressureMenuItemTerse("pre", &doMpeDynamicPressure);
+struct MenuItem doPolyAfterTouchMenuItem("poly aftertouch", &doMpePolyAfterTouch);
+struct MenuItem pressureBackoffMenuItem("pressure backoff", value, &pressureBackoff);
 struct MenuItem bendUpOnlyMenuItem("upbend only", &bendUpOnly);
-struct MenuItem bendDownOnlyMenuItem("dnbend only", &bendDownOnly);
-struct MenuItem enableBenderMenuItem("bender", &enableBender);
+struct MenuItem bendDownOnlyMenuItem("downbend only", &bendDownOnly);
+struct MenuItem enableBenderMenuItem("pitch bender", &enableBender);
+struct MenuItem fontTestMenuItem("font test", fontTestAction);
 struct MenuItem lockMenuItem("lock", &lock);
 
 struct MenuItem mpeBankLsbMenuItem("bank LSB", value, &mpeBankLsb, &mpeBankLsbMin, &mpeBankLsbMax);
 struct MenuItem mpeBankMsbMenuItem("bank MSB", value, &mpeBankMsb, &mpeBankMsbMin, &mpeBankMsbMax);
 
-struct MenuItem debugShowResistancesMenuItem("show res", &debugShowResistances);
-struct MenuItem debugShowCalibrationMenuItem("show cal", &debugShowCalibration);
+struct MenuItem debugShowResistancesMenuItem("log resistances", &debugShowResistances);
+struct MenuItem debugShowCalibrationMenuItem("log calibration", &debugShowCalibration);
 
 struct MenuItem unlockBankRangeMenuItem("unlock", &unlockBankRange);
-struct MenuItem sendETuningTableMenuItem("tx E! tt", sendETuningTableAction);
+struct MenuItem sendETuningTableMenuItem("tx E! tuning table", sendETuningTableAction);
 
 struct MenuItem doCCPassThroughMenuItem("CC thru", &doCCPassThrough);
 
-struct MenuItem versionMenuItem("fw version", versionAction);
+struct MenuItem versionMenuItem("firmware version", versionAction);
 
 uint32_t zero = 0;
 uint32_t one = 1;
@@ -2754,7 +2759,7 @@ uint32_t substitutionsActive = subDefault;
 struct MenuItem pressureCCMenuItem("pressure CC", value, &pressureCC, &zero, &maxMidiValue);
 struct MenuItem mpeProgramChangeMenuItem("patch", value, &programChange, &zero, &maxMidiValue);
 struct MenuItem mpeChannelsMenuItem("channels", value, &mpeChannels, &zero, &maxChannels);
-struct MenuItem minVelocityMenuItem("min vel", value, &minVelocity, &one, &maxMidiValue);
+struct MenuItem minVelocityMenuItem("min velocity", value, &minVelocity, &one, &maxMidiValue);
 
 struct MenuItem surgeXtPresetMenuItem("Surge XT", selection, &mpeSettings, (uint32_t)&mpeSettingsSurgeXT);
 struct MenuItem kspPresetMenuItem("Keystep Pro", selection, &mpeSettings, (uint32_t)&mpeSettingsKSP);
@@ -2766,11 +2771,11 @@ struct MenuItem x50PresetMenuItem("X50", selection, &mpeSettings, (uint32_t)&mpe
 struct MenuItem fb01PresetMenuItem("FB-01", selection, &mpeSettings, (uint32_t)&mpeSettingsFB01);
 struct MenuItem dx7EPresetMenuItem("DX7 with E!", selection, &mpeSettings, (uint32_t)&mpeSettingsDx7E);
 struct MenuItem moxPresetMenuItem("MOX6/8", selection, &mpeSettings, (uint32_t)&mpeSettingsMox8);
-struct MenuItem proteus2000PresetMenuItem("Proteus 2k", selection, &mpeSettings, (uint32_t)&mpeSettingsProteus);
+struct MenuItem proteus2000PresetMenuItem("Proteus 2000", selection, &mpeSettings, (uint32_t)&mpeSettingsProteus);
 struct MenuItem phattyPresetMenuItem("Slim Phatty", selection, &mpeSettings, (uint32_t)&mpeSettingsPhatty);
 struct MenuItem dexedPresetMenuItem("Dexed", selection, &mpeSettings, (uint32_t)&mpeSettingsDexed);
 struct MenuItem qSynthPresetMenuItem("QSynth", selection, &mpeSettings, (uint32_t)&mpeSettingsQSynth);
-struct MenuItem mt2PresetMenuItem("MT v2", selection, &mpeSettings, (uint32_t)&mpeSettingsMT2);
+struct MenuItem mt2PresetMenuItem("Midi Thing v2", selection, &mpeSettings, (uint32_t)&mpeSettingsMT2);
 struct MenuItem pianoteqMenuItem("Pianoteq", selection, &mpeSettings, (uint32_t)&mpeSettingsPianoteq);
 
 struct MenuItem arturiaMenu("Arturia", submenu, &kspPresetMenuItem);
@@ -2783,21 +2788,21 @@ struct MenuItem rolandMenu("Roland", submenu, &rd300PresetMenuItem, &xv2020Prese
 struct MenuItem yamahaMenu("Yamaha", submenu, &dx7EPresetMenuItem, &fb01PresetMenuItem, &moxPresetMenuItem);
 
 struct MenuItem* brandsMenu[] = {&arturiaMenu, &befacoMenu, &dexedPresetMenuItem, &emuMenu, &korgMenu, &modarttMenu, &moogMenu, &rolandMenu, &surgeXtPresetMenuItem, &qSynthPresetMenuItem, &yamahaMenu};
-struct MenuItem outputPresetsMenu("dev presets", submenu, &brandsMenu[0], 11);
+struct MenuItem outputPresetsMenu("synth presets", submenu, &brandsMenu[0], 11);
 struct MenuItem pbRangeMenu("bend range", submenu, &pb2MenuItem, &pb7MenuItem, &pb12MenuItem, &pb24MenuItem, &pb48MenuItem);
 struct MenuItem noteOnFirstMenuItem("note-on 1st", toggle, &noteOnFirst);
-struct MenuItem maxPressureMenuItem("max p", value, &maxMpePressure, &zero, &maxMidiValue);
-struct MenuItem minPressureMenuItem("min p", value, &minMpePressure, &zero, &maxMidiValue);
+struct MenuItem maxPressureMenuItem("max pressure", value, &maxMpePressure, &zero, &maxMidiValue);
+struct MenuItem minPressureMenuItem("min pressure", value, &minMpePressure, &zero, &maxMidiValue);
 
 struct MenuItem* outputMenuItems[] = {&useUsbMenuItem, &useDinMenuItem, &outputPresetsMenu, &mpeHandshakeMenuItem, &mpeChannelsMenuItem, &pbRangeMenu, &pressureCCMenuItem, &maxPressureMenuItem, &minPressureMenuItem, &minVelocityMenuItem, &doCCPassThroughMenuItem};
 struct MenuItem outputMenu("midi", submenu, &outputMenuItems[0], 11);
 
-struct MenuItem sub7_11MenuItem("7/4->11/8", selection, &substitutions, sub7_11);
+struct MenuItem sub7_11MenuItem("7/4\\rightarrow11/8", selection, &substitutions, sub7_11);
 struct MenuItem swap5_7MenuItem("5:7 swap", selection, &substitutions, swap5_7);
-struct MenuItem sub7_13MenuItem("14/9->13/8", selection, &substitutions, sub7_13);
-struct MenuItem sub7_25MenuItem("7/4->25/16", selection, &substitutions, sub7_25);
+struct MenuItem sub7_13MenuItem("14/9\\rightarrow13/8", selection, &substitutions, sub7_13);
+struct MenuItem sub7_25MenuItem("7/4\\rightarrow25/16", selection, &substitutions, sub7_25);
 struct MenuItem subDefaultMenuItem("default", selection, &substitutions, subDefault);
-struct MenuItem ratioSubsMenu("substitute", submenu, &sub7_11MenuItem, &sub7_13MenuItem, &sub7_25MenuItem, &swap5_7MenuItem, &subDefaultMenuItem);
+struct MenuItem ratioSubsMenu("substitutions", submenu, &sub7_11MenuItem, &sub7_13MenuItem, &sub7_25MenuItem, &swap5_7MenuItem, &subDefaultMenuItem);
 
 struct MenuItem* controlsMenuItems[] = {&doVelocityMenuItem, &doPressureMenuItem, &doPolyAfterTouchMenuItem, &pressureBackoffMenuItem, &enableBenderMenuItem, &ratioSubsMenu};
 struct MenuItem controlsMenu("controls", submenu, &controlsMenuItems[0], 6);
@@ -2854,31 +2859,31 @@ struct MenuItem reverbLoDampMenuItem("low damp", &reverbLoDamp);
 struct MenuItem reverbLowPassMenuItem("low pass", &reverbLowPass);
 struct MenuItem reverbDiffusionMenuItem("diffusion", &reverbDiffusion);
 
-struct MenuItem oscillator1Menu("osc1", submenu, waveform1menuItems, 7);
-struct MenuItem oscillator2Menu("osc2", submenu, waveform2menuItems, 7);
-struct MenuItem oscillator3Menu("osc3", submenu, waveform3menuItems, 7);
+struct MenuItem oscillator1Menu("oscillator 1", submenu, waveform1menuItems, 7);
+struct MenuItem oscillator2Menu("oscillator 2", submenu, waveform2menuItems, 7);
+struct MenuItem oscillator3Menu("oscillator 3", submenu, waveform3menuItems, 7);
 
 struct MenuItem subtractiveMenu("subtractive", submenu, &subtractiveEnableMenuItem, &oscillator1Menu, &oscillator2Menu, &oscillator3Menu);
 
-struct MenuItem stringSynthMenu("Kar+Strong", submenu, &stringSynthMenuItems[0], 7);
+struct MenuItem stringSynthMenu("Karplus-Strong", submenu, &stringSynthMenuItems[0], 7);
 struct MenuItem reverbMenu("reverb", submenu, &reverbSizeMenuItem, &reverbHiDampMenuItem, &reverbLoDampMenuItem, &reverbLowPassMenuItem, &reverbDiffusionMenuItem);
 
-struct MenuItem synthMenu("synth", submenu, &subtractiveMenu, &reverbMenu, &stringSynthMenu);
+struct MenuItem synthMenu("internal synth", submenu, &subtractiveMenu, &reverbMenu, &stringSynthMenu);
 
-struct MenuItem* debugMenuItems[] = {&versionMenuItem, &debugShowResistancesMenuItem, &debugShowCalibrationMenuItem, &noteOnFirstMenuItem, &bendUpOnlyMenuItem, &bendDownOnlyMenuItem, &lockMenuItem};
-struct MenuItem debugMenu("debug", submenu, &debugMenuItems[0], 7);
+struct MenuItem* debugMenuItems[] = {&versionMenuItem, &debugShowResistancesMenuItem, &debugShowCalibrationMenuItem, &noteOnFirstMenuItem, &bendUpOnlyMenuItem, &bendDownOnlyMenuItem, &fontTestMenuItem, &lockMenuItem};
+struct MenuItem debugMenu("debug", submenu, &debugMenuItems[0], 8);
 
 struct MenuItem configMenu("settings", submenu, &outputMenu, &controlsMenu, &interfaceMenu, &synthMenu, &debugMenu);
 
-struct MenuItem saveMenuItem("save", saveAction);
+struct MenuItem saveMenuItem("save settings", saveAction);
 
 struct MenuItem rootMenu("", submenu, &configMenu, &patchesMenu, &emptyMenuItem, &saveMenuItem, &allNotesOffSlowMenuItem);
 
 void menuSetup() {
   menuSelect(&rootMenu, 0);
 
-  patchesMenu.addOption(&doVelocityMenuItemTerse, 0);
-  patchesMenu.addOption(&doPressureMenuItemTerse, 2);
+  patchesMenu.addOption(&doVelocityMenuItem, 0);
+  patchesMenu.addOption(&doPressureMenuItem, 2);
 }
 
 /* Storage */
@@ -2995,6 +3000,8 @@ void setup() {
   adcSetup();
   Serial.println("initializing shift registers...");
   shiftRegisterSetup();
+  Serial.println("initializing font...");
+  fontSetup();
   Serial.println("initializing screen...");
   screenSetup();
   Serial.println("initializing CAN bus...");
