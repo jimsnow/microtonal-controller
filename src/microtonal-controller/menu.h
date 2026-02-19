@@ -49,7 +49,7 @@ struct MenuItem {
     }
   }
   MenuItem(String text, void (*select)(void *data), void *data = nullptr) : text{text}, type{action}, select{select}, data{data} {}
-  MenuItem(String text, enum menuItemType type, uint32_t *data, uint32_t *minValue, uint32_t *maxValue) : text{text}, type{type}, data{data}, minValue{minValue}, maxValue{maxValue} {}
+  MenuItem(String text, enum menuItemType type, uint32_t *data, uint32_t *minValue = nullptr, uint32_t *maxValue = nullptr) : text{text}, type{type}, data{data}, minValue{minValue}, maxValue{maxValue} {}
   MenuItem(String text, float *data) : text{text}, type{floatValue}, data{(void*)data} {}
   MenuItem(String text, bool *data) : text{text}, type{toggle}, data{(void*)data} {
     if (data != nullptr) {
@@ -62,6 +62,7 @@ struct MenuItem {
     }
   }
 
+  MenuItem(String text, int keyIndex) : text{text}, type{keySelect}, data{(void*)keyIndex} {}
 
   bool checkHighlight(struct MenuItem *editItem) {
     switch (type) {
@@ -75,9 +76,9 @@ struct MenuItem {
         highlight = *(uint32_t*)data == defaultValue;
         break;
       case value:
-        highlight = editItem == this;
-        break;
+      case signedValue:
       case floatValue:
+      case keySelect:
         highlight = editItem == this;
         break;
       default:

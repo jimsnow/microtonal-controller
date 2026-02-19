@@ -18,7 +18,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 */
 
-#define fwversion "1.1.5"
+#define fwversion "1.1.6"
 
 #define hwversion 4
 
@@ -143,9 +143,19 @@ float maxPressureResistance = 800.0f;
 /*
  * Force can be outside range of 0 (minimum force) to 1 (maximum force)
  */
- 
+
+/*
 float resistanceToForce(float r, float area = 1.0f) {
   return 1.0f - lerpNoClamp(max(area, 2.0f) / maxPressureResistance, 1.0f / r, area / zeroPressureResistance);
+}*/
+
+float resistanceToForce(float r, float area = 1.0f) {
+  float area_ = max(area, 3.0f);
+  float zpr = zeroPressureResistance / area_;
+  float mpr = maxPressureResistance;
+
+  //return 1.0f - lerpNoClamp(area_ / maxPressureResistance, area_ / r, area_ / zeroPressureResistance);
+  return lerpNoClamp(zpr, r, mpr);
 }
 
 const int maxShiftRegisterBits = 8+32;
@@ -156,8 +166,9 @@ const int maxShiftRegisterBits = 8+32;
 #define WAVEFORM_NONE 1000
 #define oscillators 3
 
-int synthWaveform[oscillators] = {WAVEFORM_BANDLIMIT_SAWTOOTH, WAVEFORM_NONE, WAVEFORM_NONE};
+uint32_t synthWaveform[oscillators] = {WAVEFORM_BANDLIMIT_SAWTOOTH, WAVEFORM_NONE, WAVEFORM_NONE};
 float synthWaveformOffset[oscillators] = {1.0f, 1.5f, 0.5f};
+int synthWaveformOffsetKey[oscillators] = {56, 71, 28};  /* key index for 1/1, 3/2, and 1/2 */
 float synthWaveformLevel[oscillators] = {1.0f, 0.75f, 0.75f};
 bool doStringSynth = false;
 bool doSubtractiveSynth = true;
@@ -177,9 +188,11 @@ enum menuItemType {
   action,
   toggle,
   value,
+  signedValue,
   floatValue,
   selection,
   submenu,
+  keySelect,
   empty
 };
 
@@ -524,7 +537,7 @@ float volumeAttackRate = 1000000.0f;
 float filterReleaseRate = 2.0f;
 float filterAttackRate = 1000000.0f;
 
-double inverseLog2 = 1.0 / log(2.0);
+const double inverseLog2 = 1.0 / log(2.0);
 
 double pitchToCents(double pitch) {
   return log(pitch) * inverseLog2 * 1200.0;
@@ -539,7 +552,20 @@ double centsToPitch(double cents) {
   return pow(factor, cents);
 }
 
-double semitone = pow(2.0, (1.0/12.0));
+const double semitone = pow(2.0, (1.0 / 12.0));
+const double cent = pow(2.0, (1.0 / 1200.0));
+
+bool doQuantize = false;
+double quantizeEdo = 12.0;
+
+double quantize(double pitch, double edo) {
+  double cents = pitchToCents(pitch);
+  double edoStepSize = 1200.0 / edo;
+  int edoSteps = round(cents / edoStepSize);
+  double newCents = edoStepSize * edoSteps;
+
+  return centsToPitch(newCents);
+}
 
 enum midiType {
   monovoice,
@@ -565,7 +591,11 @@ float mpeStaticVelocity = 0.75;
 //float minVelocity = 0.2;
 bool doMpeChannelPressure = false;
 
-double transpose = 1.0;
+double transpose = 1.0; /* current transpose setting with all modifiers calculated in */
+double transposeShift = 1.0; /* arbitrary interval transpose */
+int octaveShift = 0;
+int semitoneShift = 0;
+int centsShift = 0;
 uint32_t mpeBankLsbMin = 0;
 uint32_t mpeBankLsbMax = 0;
 uint32_t mpeBankMsbMin = 0;
@@ -1140,6 +1170,9 @@ struct VoiceHandle {
 };
 
 void beginNote(struct VoiceHandle &voiceHandle, float pitch, float velocity, float pressure, uint16_t owner) {
+  if (doQuantize) {
+    pitch = quantize(pitch, quantizeEdo);
+  }
   switch (midiType) {
     case tuningtable:
       {
@@ -1711,6 +1744,10 @@ struct Pitch {
     ratio.a /= div;
     ratio.b /= div;
   }
+  double asDouble() {
+    return (double)ratio.a / (double)ratio.b;
+  }
+
   enum PitchType type;
   union {
     RatioPitch ratio;
@@ -1845,6 +1882,8 @@ void knobPressureExponentAction(uint32_t unused, float value) {
 struct Key keys[maxKeys];
 int keyAllocIdx = 0;
 
+
+
 #define maxKnobs 10
 struct Knob knobs[maxKnobs];
 
@@ -1874,6 +1913,7 @@ struct Control {
     delay = 0;
     thresholdPressure = 0;
     maxPressure = 4095;
+    context = nullptr;
   };
 
   Control(enum ControlType type, int bit, int channel, const char name_[controlNameLen], uint16_t thresholdPressure, uint16_t maxPressure):
@@ -1887,6 +1927,7 @@ struct Control {
     delay = 0;
     data = 0;
     held = false;
+    context = nullptr;
   };
 
   enum ControlType type;
@@ -1902,6 +1943,7 @@ struct Control {
   uint32_t data;
   bool held;
   float area = 1.0f;
+  void *context;
 };
 
 enum SensorType {
@@ -1911,6 +1953,176 @@ enum SensorType {
 };
 
 enum SensorType sensorType = velostat;
+
+enum ControlButtonPairMode {
+  continuous,
+  momentary,
+  latching,
+  counting
+};
+
+enum ControlButtonPairFunction {
+  transposeOctave,
+  transposeSemitone,
+  transposeInterval,
+  pitchbend,
+  filterCutoff,
+  modulationAmmount,
+  sustain,
+  noop
+};
+
+enum ControlButtonPairPolarity {
+  bipolar = 0,
+  positive,
+  negative
+};
+
+float sustainPedal = 0.0f;
+
+bool transposeOk(int octave, int semitone) {
+  float newTranspose = octave + ((float)semitone / 12.0f);
+  if (lock) {
+    return newTranspose >= -1.001f && newTranspose <= 1.001f;
+  } else {
+    return newTranspose >= -2.001f && newTranspose <= 3.001f;
+  }
+}
+
+struct ControlButtonPair{
+  ControlButtonPair(ControlButtonPairMode mode, ControlButtonPairFunction function, ControlButtonPairPolarity polarity, String name) : mode(mode), function(function), polarity(polarity), name(name) {}
+  void update() {
+    int delta = 0;
+
+    if (mode != continuous) {
+      if (valueUp > 0.0f) {
+        if (valueUp > valueDown) {
+          valueUp = 1.0f;
+        } else {
+          valueUp = 0.0f;
+        }
+      }
+      if (valueDown > 0.0f) {
+        if (valueDown > valueUp) {
+          valueDown = 1.0f;
+        } else {
+          valueDown = 0.0f;
+        }
+      }
+    }
+
+    switch (polarity) {
+      case bipolar:
+        valueDown = -valueDown;
+        break;
+      case positive:
+        break;
+      case negative:
+        valueUp = -valueUp;
+        valueDown = -valueDown;
+        break;
+    }
+
+    value = valueUp + valueDown;
+
+    if (valueUpLast == 0.0f && valueUp > 0.0f) {
+      delta++;
+    }
+
+    if (valueUpLast > 0.0f && valueUp == 0.0f) {
+      if (mode == momentary) {
+        delta--;
+      }
+    }
+
+    if (valueDownLast == 0.0f && valueDown > 0.0f) {
+      delta--;
+    }
+
+    if (valueDownLast > 0.0f && valueDown == 0.0f) {
+      if (mode == momentary) {
+        delta++;
+      }
+    }
+
+    count += delta;
+
+    switch (function) {
+      case noop:
+        break;
+      case transposeOctave:
+        if (mode == counting || mode == momentary) {
+          if (transposeOk(octaveShift + delta, semitoneShift)) {
+            octaveShift += delta;
+          }
+        }
+        break;
+      case transposeSemitone:
+        if (!lock && (mode == counting || mode == momentary)) {
+          if (transposeOk(octaveShift, semitoneShift + delta)) {
+            semitoneShift = semitoneShift + delta;
+            if (semitoneShift >= 12) {
+              semitoneShift -= 12;
+              octaveShift += 1;
+            }
+            if (semitoneShift < 0) {
+              semitoneShift += 12;
+              octaveShift -= 1;
+            }
+          }
+        }
+        break;
+      case transposeInterval:
+        if (delta != 0 && (mode == counting || mode == momentary)) {
+          transposeShift = pow(interval, (double) count); /* we have exclusive control of this one */
+          transposeUpdate();
+        }
+        break;
+      case pitchbend:
+        pbUp = valueUp;
+        pbDown = valueDown;
+        break;
+      case sustain:
+        sustainPedal = value;
+      default:
+        break;
+    }
+
+    valueUpLast = valueUp;
+    valueDownLast = valueDown;
+
+    valueUp = 0.0f;
+    valueDown = 0.0f;
+  }
+
+  ControlButtonPairMode mode;
+  ControlButtonPairFunction function;
+  ControlButtonPairPolarity polarity;
+
+  //Control* upControl;
+  //Control* downControl;
+
+  float valueUp = 0.0f;
+  float valueDown = 0.0f;
+
+  float valueUpLast = 0.0f;
+  float valueDownLast = 0.0f;
+
+  float value = 0.0f;
+  double interval = 81.0f/80.0f;
+  int count = 0.0f;
+
+  String name;
+};
+
+
+struct Key *mostRecentKey = nullptr;
+
+void newKeyPressAction(struct Key* key) {
+  Serial.println("pressed key " + String(key->index));
+  handleNewKeyPress(key);
+  mostRecentKey = key;
+}
 
 void keyUpdate(struct Control* control, uint32_t deltaUsecs) {
   struct Key *key = control->key;
@@ -1923,7 +2135,7 @@ void keyUpdate(struct Control* control, uint32_t deltaUsecs) {
 
   if (doMpeDynamicVelocity) {
     float delta = pressure - lastPressure;
-    velocity = delta > 0
+    velocity = delta > 0.0f
       ? pow( ( delta * 12000.0f) / (float)deltaUsecs, 0.2f)
       : pow( (-delta * 12000.0f) / (float)deltaUsecs, 0.2f);
     if (velocity > 1.0f) {
@@ -1931,6 +2143,11 @@ void keyUpdate(struct Control* control, uint32_t deltaUsecs) {
     } else if (velocity < 0.0f) {
       velocity = 0.0f;
     }
+  }
+
+  if (pressure < lastPressure && pressure < sustainPedal) {
+    pressure = min(sustainPedal, lastPressure);
+    key->lastPressure = pressure;
   }
 
   float intensity = 1.0f;
@@ -1954,6 +2171,7 @@ void keyUpdate(struct Control* control, uint32_t deltaUsecs) {
         }
         /* fall through */
       case idle:
+        newKeyPressAction(key);
         beginNote(key->voiceHandle, (double)key->pitch.ratio.a / (double)key->pitch.ratio.b, velocity, intensity, key->index);
         Serial.println("noteOn " + String(key->pitch.ratio.a) + "/" + String(key->pitch.ratio.b) + " v=" + String(velocity));
         key->state = playing;
@@ -1983,6 +2201,7 @@ void keyUpdate(struct Control* control, uint32_t deltaUsecs) {
   }
 }
 
+/*
 void pbUpUpdate(struct Control* control, uint32_t deltaUsecs) {
   float force = forces[control->bit][control->channel];
   if (force < 0.0f) {
@@ -2000,6 +2219,7 @@ void pbDownUpdate(struct Control* control, uint32_t deltaUsecs) {
 
   pbDown = force;
 }
+*/
 
 bool debounce(struct Control* control, uint32_t deltaUsecs) {
   if (deltaUsecs >= control->delay) {
@@ -2195,6 +2415,17 @@ void statusTextUpdate() {
      default:   name = "?";  break;
   }
 
+  double leftovers = cents - ((double)closestSemitone * 100.0f);
+
+  String offset;
+  if (leftovers < 0.01 && leftovers > -0.01) {
+    offset = "";
+  } else {
+    offset = leftovers > 0
+      ? "+" + String(leftovers, 0).replace(" ", "") + "\\cent"
+      : "-" + String(-leftovers, 0).replace(" ", "") + "\\cent";
+  }
+
   String type;
   switch (midiType) {
     case (monotimbral):  type = "poly"; break;
@@ -2217,66 +2448,78 @@ void statusTextUpdate() {
     output = output + " \\lock";
   }
 
-  setStatusText(name + String(octave+4), type, output);
+  setStatusText(name + String(octave+4) + offset, type, output);
 }
 
-void transposeUpdate(struct Control* control, uint32_t deltaUsecs, float transposeAmount) {
+void checkTransposeUpdate() {
+  static double lastTranspose = 1.0;
+  static int lastOctaveShift = 0;
+  static int lastSemitoneShift = 0;
+  static int lastCentsShift = 0;
+
+  if (transpose != lastTranspose || lastOctaveShift != octaveShift || lastSemitoneShift != semitoneShift || lastCentsShift != centsShift) {
+    transposeUpdate();
+    lastTranspose = transpose;
+    lastOctaveShift = octaveShift;
+    lastSemitoneShift = semitoneShift;
+    lastCentsShift = centsShift;
+  }
+}
+
+void transposeUpdate() {
+  double maxTranspose = lock ? 2.0f : 8.0f;
+  double minTranspose = lock ? 0.5f : 0.25f;
+
+  double transpose_ = 1.0 * pow(2.0, octaveShift) * pow(2.0, (double)semitoneShift / 12.0) * pow(2.0, (double)centsShift / 1200.0) * transposeShift;
+
+  if (transpose_ > maxTranspose) {
+    transpose_ = maxTranspose;
+  } else if (transpose_ < minTranspose) {
+    transpose_ = minTranspose;
+  }
+
+  transpose = transpose_;
+
+  statusTextUpdate();
+  setPitchReference(pitchReferenceHz());
+
+  /* re-generate and send the whole tuning table */
+  if (midiType == tuningtable) {
+    if (tuningTableType == eTuningTable) {
+      sendETuningTable(0);
+    }
+  }
+}
+
+void controlButtonUpdate(struct Control* control, uint32_t deltaUsecs) {
   check_debounce;
 
-  float maxTranspose = lock ? 2.0f : 8.0f;
-  float minTranspose = lock ? 0.5f : 0.25f;
-
+  float *value = (float *)(control->context);
   float force = forces[control->bit][control->channel];
+  if (value == nullptr) {
+    //force = 0.0f;
+    control->held = false;
+    return;
+  }
+
+  if (force < 0.0f) {
+    force = 0.0f;
+  }
+
   if (force > 0.02f) {
     if (!control->held) {
-      transpose *= transposeAmount;
-      if (transpose > maxTranspose) {
-        transpose = maxTranspose;
-      } else if (transpose < minTranspose) {
-        transpose = minTranspose;
-      }
-
-      statusTextUpdate();
-      setPitchReference(pitchReferenceHz());
       control->held = true;
-
-      /* re-generate and send the whole tuning table */
-      if (midiType == tuningtable) {
-        if (tuningTableType == eTuningTable) {
-          sendETuningTable(0);
-        }
-      }
     }
+    *value = force - 0.02f;
   }
   
-  if (force <= 0.0) {
+  if (force <= 0.02) {
     if (control->held) {
       control->held = false;
-      control->delay = 200000;
+      control->delay = 10000;
     }
+    *value = 0.0f;
   }
-}
-
-void transposeUpUpdate(struct Control* control, uint32_t deltaUsecs) {
-  transposeUpdate(control, deltaUsecs, 2.0f);
-}
-
-void transposeDownUpdate(struct Control* control, uint32_t deltaUsecs) {
-  transposeUpdate(control, deltaUsecs, 0.5f);
-}
-
-void transposeUpSemitoneUpdate(struct Control* control, uint32_t deltaUsecs) {
-  if (lock) {
-    return;
-  }
-  transposeUpdate(control, deltaUsecs, semitone);
-}
-
-void transposeDownSemitoneUpdate(struct Control* control, uint32_t deltaUsecs) {
-  if (lock) {
-    return;
-  }
-  transposeUpdate(control, deltaUsecs, 1.0f/semitone);
 }
 
 void editValueIncrementUpdate(struct Control* control, uint32_t deltaUsecs) {
@@ -2285,7 +2528,7 @@ void editValueIncrementUpdate(struct Control* control, uint32_t deltaUsecs) {
   float force = forces[control->bit][control->channel];
   if (force > 0.0f) {
     incrementMenuValue();
-    control->delay = (uint32_t)((1.0 - force) * 200000.0);
+    control->delay = (uint32_t)((1.0f - force) * 200000.0f);
   }
 }
 
@@ -2295,11 +2538,92 @@ void editValueDecrementUpdate(struct Control* control, uint32_t deltaUsecs) {
   float force = forces[control->bit][control->channel];
   if (force > 0.0f) {
     decrementMenuValue();
-    control->delay = (uint32_t)((1.0 - force) * 200000.0);
+    control->delay = (uint32_t)((1.0f - force) * 200000.0f);
   }
 }
 
 struct Control controls[maxShiftRegisterBits][adcChannels];
+
+#define maxControlButtonPairs 10
+
+struct Control* controlButtons[maxControlButtonPairs][2] = { nullptr };
+int numControlButtonPairs = 0;
+
+ControlButtonPair controlButtonPairs[] = {
+  ControlButtonPair(counting, transposeOctave, positive, "octave shift"),
+  ControlButtonPair(counting, transposeSemitone, positive, "semitone shift"),
+  ControlButtonPair(continuous, pitchbend, positive, "pitch bender"),
+  ControlButtonPair(continuous, sustain, positive, "sustain"),
+  ControlButtonPair(momentary, transposeInterval, positive, "81/80 shift"),
+  ControlButtonPair(momentary, noop, positive, "disable")
+};
+
+#define transposeOctaveIdx 0
+#define transposeSemitoneIdx 1
+#define pitchbendIdx 2
+#define sustainIdx 3
+#define transposeIntervalIdx 4
+#define noopIdx 5
+
+int leftButtonsControl = transposeOctaveIdx;
+int centerButtonsControl = pitchbendIdx;
+int rightButtonsControl = transposeSemitoneIdx;
+
+int leftButtonsControlLast = -1;
+int centerButtonsControlLast = -1;
+int rightButtonsControlLast = -1;
+
+struct ControlButtonPair* octaveShiftControlButtonPair = &controlButtonPairs[transposeOctaveIdx];
+struct ControlButtonPair* semitoneShiftControlButtonPair = &controlButtonPairs[transposeSemitoneIdx];
+struct ControlButtonPair* pitchbendControlButtonPair = &controlButtonPairs[pitchbendIdx];
+struct ControlButtonPair* sustainControlButtonPair = &controlButtonPairs[sustainIdx];
+struct ControlButtonPair* intervalShiftControlButtonPair = &controlButtonPairs[transposeIntervalIdx];
+
+void controlButtonPairsUpdate(uint32_t deltaUsecs) {
+
+  if (leftButtonsControlLast != leftButtonsControl) {
+    setControlButtonPair(0, leftButtonsControl);
+    leftButtonsControlLast = leftButtonsControl;
+  }
+
+  if (centerButtonsControlLast != centerButtonsControl) {
+    setControlButtonPair(1, centerButtonsControl);
+    centerButtonsControlLast = centerButtonsControl;
+  }
+
+  if (rightButtonsControlLast != rightButtonsControl) {
+    setControlButtonPair(2, rightButtonsControl);
+    rightButtonsControlLast = rightButtonsControl;
+  }
+
+  for (uint32_t i = 0; i < sizeof(controlButtonPairs) / sizeof(controlButtonPairs[0]); i++) {
+    controlButtonPairs[i].update();
+  }
+}
+
+void setControlButtonPair(int selected, int cbpi) {
+  struct Control *c1 = controlButtons[selected][0];
+  struct Control *c2 = controlButtons[selected][1];
+
+  struct ControlButtonPair* cbp = &controlButtonPairs[cbpi];
+
+  for (int i = 0; i < numControlButtonPairs; i++) {
+    if (i == selected) {
+      continue;
+    }
+    if (controlButtons[i][0]->context == &cbp->valueUp) {
+      controlButtons[i][0]->context = nullptr;
+    }
+    if (controlButtons[i][1]->context == &cbp->valueDown) {
+      controlButtons[i][1]->context = nullptr;
+    }
+  }
+
+  c1->context = &cbp->valueUp;
+  c1->update = controlButtonUpdate;
+  c2->context = &cbp->valueDown;
+  c2->update = controlButtonUpdate;
+}
 
 #define CONTROL(type, bit, channel, name) (controls[bit][channel] = Control(type, bit, channel, name, thresholdPressure, maxPressure))
 
@@ -2595,22 +2919,39 @@ void controlSetupKeybed(uint16_t thresholdPressure, uint16_t maxPressure) {
   CONTROL(pressure, 8+16+7, 3, "spacebar-dn");
   CONTROL(pressure, 8+24+6, 3, "control-4");
   CONTROL(pressure, 8+24+7, 3, "control-3");
-  
 
-  controls[8+8+6][3].update = transposeDownUpdate;
-  controls[8+8+7][3].update = transposeUpUpdate;
-  controls[8+24+7][3].update = transposeDownSemitoneUpdate;
-  controls[8+24+6][3].update = transposeUpSemitoneUpdate;
+
+  int prev = numControlButtonPairs;
+  controlButtons[prev+0][1] = &controls[8+8+6][3];
+  controlButtons[prev+0][0] = &controls[8+8+7][3];
+
+  controlButtons[prev+1][0] = &controls[8+16+6][3];
+  controlButtons[prev+1][1] = &controls[8+16+7][3];
+
+  controlButtons[prev+2][1] = &controls[8+24+7][3];
+  controlButtons[prev+2][0] = &controls[8+24+6][3];
+  numControlButtonPairs += 3;
+
+  controls[8+8+6][3].update = controlButtonUpdate;
+  controls[8+8+6][3].context = &octaveShiftControlButtonPair->valueDown;
+  controls[8+8+7][3].update = controlButtonUpdate;
+  controls[8+8+7][3].context = &octaveShiftControlButtonPair->valueUp;
+  controls[8+24+7][3].update = controlButtonUpdate;
+  controls[8+24+7][3].context = &semitoneShiftControlButtonPair->valueDown;
+  controls[8+24+6][3].update = controlButtonUpdate;
+  controls[8+24+6][3].context = &semitoneShiftControlButtonPair->valueUp;
 
   /* "spacebar" has huge surface area, so requires a much higher threshold */
   int pbThresholdPressure = thresholdPressure * 4.0;
   int pbMaxPressure = maxPressure + (pbThresholdPressure - thresholdPressure);   //(thresholdPressure + maxPressure) - (pbThresholdPressure + 500);
 
-  controls[8+16+6][3].update = pbUpUpdate;
+  controls[8+16+6][3].update = controlButtonUpdate; //pbUpUpdate;
+  controls[8+16+6][3].context = &pitchbendControlButtonPair->valueUp;
   controls[8+16+6][3].thresholdPressure = pbThresholdPressure;
   controls[8+16+6][3].maxPressure = pbMaxPressure;
   controls[8+16+6][3].area = 4.0f;
-  controls[8+16+7][3].update = pbDownUpdate;
+  controls[8+16+7][3].update = controlButtonUpdate; //pbDownUpdate;
+  controls[8+16+7][3].context = &pitchbendControlButtonPair->valueDown;
   controls[8+16+7][3].thresholdPressure = pbThresholdPressure;
   controls[8+16+7][3].maxPressure = pbMaxPressure;
   controls[8+16+7][3].area = 4.0f;
@@ -2691,9 +3032,10 @@ void saveAction(void *data) {
   saveAllSettings("settings");
 }
 
-void fontTestAction(void*data) {
+void fontTestAction(void *data) {
   fontTest();
 }
+
 
 bool enableVisualizer = false;
 bool lastEnableVisualizer = enableVisualizer;
@@ -2731,7 +3073,7 @@ struct MenuItem doPolyAfterTouchMenuItem("poly aftertouch", &doMpePolyAfterTouch
 struct MenuItem pressureBackoffMenuItem("pressure backoff", value, &pressureBackoff);
 struct MenuItem bendUpOnlyMenuItem("upbend only", &bendUpOnly);
 struct MenuItem bendDownOnlyMenuItem("downbend only", &bendDownOnly);
-struct MenuItem enableBenderMenuItem("pitch bender", &enableBender);
+//struct MenuItem enableBenderMenuItem("pitch bender", &enableBender);
 struct MenuItem fontTestMenuItem("font test", fontTestAction);
 struct MenuItem lockMenuItem("lock", &lock);
 
@@ -2797,6 +3139,77 @@ struct MenuItem minPressureMenuItem("min pressure", value, &minMpePressure, &zer
 struct MenuItem* outputMenuItems[] = {&useUsbMenuItem, &useDinMenuItem, &outputPresetsMenu, &mpeHandshakeMenuItem, &mpeChannelsMenuItem, &pbRangeMenu, &pressureCCMenuItem, &maxPressureMenuItem, &minPressureMenuItem, &minVelocityMenuItem, &doCCPassThroughMenuItem};
 struct MenuItem outputMenu("midi", submenu, &outputMenuItems[0], 11);
 
+/*
+enum ControlButtonPairFunction {
+  transposeOctave,
+  transposeSemitone,
+  transposeInterval,
+  pitchbend,
+  filterCutoff,
+  modulationAmmount,
+  sustain
+};*/
+
+
+
+struct MenuItem leftOctaveTransposeMenuItem("octave shift", selection, &leftButtonsControl, transposeOctaveIdx);
+struct MenuItem leftSemitoneTransposeMenuItem("semitone shift", selection, &leftButtonsControl, transposeSemitoneIdx);
+struct MenuItem leftIntervalTransposeMenuItem("comma shift", selection, &leftButtonsControl, transposeIntervalIdx);
+struct MenuItem leftPitchbendMenuItem("pitch bend", selection, &leftButtonsControl, pitchbendIdx);
+struct MenuItem leftSustainMenuItem("sustain", selection, &leftButtonsControl, sustainIdx);
+struct MenuItem leftNoopMenuItem("disable", selection, &leftButtonsControl, noopIdx);
+
+struct MenuItem centerOctaveTransposeMenuItem("octave shift", selection, &centerButtonsControl, transposeOctaveIdx);
+struct MenuItem centerSemitoneTransposeMenuItem("semitone shift", selection, &centerButtonsControl, transposeSemitoneIdx);
+struct MenuItem centerIntervalTransposeMenuItem("comma shift", selection, &centerButtonsControl, transposeIntervalIdx);
+struct MenuItem centerPitchbendMenuItem("pitch bend", selection, &centerButtonsControl, pitchbendIdx);
+struct MenuItem centerSustainMenuItem("sustain", selection, &centerButtonsControl, sustainIdx);
+struct MenuItem centerNoopMenuItem("disable", selection, &centerButtonsControl, noopIdx);
+
+struct MenuItem rightOctaveTransposeMenuItem("octave shift", selection, &rightButtonsControl, transposeOctaveIdx);
+struct MenuItem rightSemitoneTransposeMenuItem("semitone shift", selection, &rightButtonsControl, transposeSemitoneIdx);
+struct MenuItem rightIntervalTransposeMenuItem("comma shift", selection, &rightButtonsControl, transposeIntervalIdx);
+struct MenuItem rightPitchbendMenuItem("pitch bend", selection, &rightButtonsControl, pitchbendIdx);
+struct MenuItem rightSustainMenuItem("sustain", selection, &rightButtonsControl, sustainIdx);
+struct MenuItem rightNoopMenuItem("disable", selection, &rightButtonsControl, noopIdx);
+
+struct MenuItem* leftControlMenuItems[] = {
+  &leftOctaveTransposeMenuItem, &leftSemitoneTransposeMenuItem, &leftIntervalTransposeMenuItem, &leftPitchbendMenuItem, &leftSustainMenuItem, &leftNoopMenuItem
+};
+struct MenuItem* centerControlMenuItems[] = {
+  &centerOctaveTransposeMenuItem, &centerSemitoneTransposeMenuItem, &centerIntervalTransposeMenuItem, &centerPitchbendMenuItem, &centerSustainMenuItem, &centerNoopMenuItem
+};
+struct MenuItem* rightControlMenuItems[] = {
+  &rightOctaveTransposeMenuItem, &rightSemitoneTransposeMenuItem, &rightIntervalTransposeMenuItem, &rightPitchbendMenuItem, &rightSustainMenuItem, &rightNoopMenuItem
+};
+
+struct MenuItem leftControlButtonsMenu("left buttons", submenu, &leftControlMenuItems[0], 6);
+struct MenuItem centerControlButtonsMenu("center button", submenu, &centerControlMenuItems[0], 6);
+struct MenuItem rightControlButtonsMenu("right buttons", submenu, &rightControlMenuItems[0], 6);
+
+struct MenuItem* controlsMenuItems[] = {
+  &doVelocityMenuItem, &doPressureMenuItem, &doPolyAfterTouchMenuItem, &pressureBackoffMenuItem,
+  &leftControlButtonsMenu, &centerControlButtonsMenu, &rightControlButtonsMenu
+};
+struct MenuItem controlsMenu("controls", submenu, &controlsMenuItems[0], 7);
+
+struct MenuItem visualizerMenuItem("visualizer", toggle, &enableVisualizer);
+struct MenuItem screenBrightnessMenu("brightness", submenu, &screen10MenuItem, &screen25MenuItem, &screen50MenuItem, &screen75MenuItem, &screen100MenuItem);
+struct MenuItem interfaceMenu("interface", submenu, &screenBrightnessMenu, &visualizerMenuItem);
+struct MenuItem patchesMenu("patches", submenu, &mpeBankMsbMenuItem,  &mpeBankLsbMenuItem, &mpeProgramChangeMenuItem, &unlockBankRangeMenuItem);
+
+int32_t minOctaveShift = -2;
+int32_t maxOctaveShift = 3;
+struct MenuItem octaveShiftMenuItem("octave", signedValue, (uint32_t*)&octaveShift, (uint32_t*)&minOctaveShift, (uint32_t*)&maxOctaveShift);
+
+int32_t minSemitoneShift = -11;
+int32_t maxSemitoneShift = 11;
+struct MenuItem semitoneShiftMenuItem("semitone", signedValue, (uint32_t*)&semitoneShift, (uint32_t*)&minSemitoneShift, (uint32_t*)&maxSemitoneShift);
+
+int32_t minCentsShift = -1200;
+int32_t maxCentsShift = 1200;
+struct MenuItem centsShiftMenuItem("cents", signedValue, (uint32_t*)&centsShift, (uint32_t*)&minCentsShift, (uint32_t*)&maxCentsShift);
+
 struct MenuItem sub7_11MenuItem("7/4\\rightarrow11/8", selection, &substitutions, sub7_11);
 struct MenuItem swap5_7MenuItem("5:7 swap", selection, &substitutions, swap5_7);
 struct MenuItem sub7_13MenuItem("14/9\\rightarrow13/8", selection, &substitutions, sub7_13);
@@ -2804,13 +3217,7 @@ struct MenuItem sub7_25MenuItem("7/4\\rightarrow25/16", selection, &substitution
 struct MenuItem subDefaultMenuItem("default", selection, &substitutions, subDefault);
 struct MenuItem ratioSubsMenu("substitutions", submenu, &sub7_11MenuItem, &sub7_13MenuItem, &sub7_25MenuItem, &swap5_7MenuItem, &subDefaultMenuItem);
 
-struct MenuItem* controlsMenuItems[] = {&doVelocityMenuItem, &doPressureMenuItem, &doPolyAfterTouchMenuItem, &pressureBackoffMenuItem, &enableBenderMenuItem, &ratioSubsMenu};
-struct MenuItem controlsMenu("controls", submenu, &controlsMenuItems[0], 6);
-
-struct MenuItem visualizerMenuItem("visualizer", toggle, &enableVisualizer);
-struct MenuItem screenBrightnessMenu("brightness", submenu, &screen10MenuItem, &screen25MenuItem, &screen50MenuItem, &screen75MenuItem, &screen100MenuItem);
-struct MenuItem interfaceMenu("interface", submenu, &screenBrightnessMenu, &visualizerMenuItem);
-struct MenuItem patchesMenu("patches", submenu, &mpeBankMsbMenuItem,  &mpeBankLsbMenuItem, &mpeProgramChangeMenuItem, &unlockBankRangeMenuItem);
+struct MenuItem quantizeMenuItem("quantize pitch", toggle, &doQuantize);
 
 struct MenuItem saw1menuItem("sawtooth", selection, &synthWaveform[0], WAVEFORM_BANDLIMIT_SAWTOOTH);
 struct MenuItem trilean1menuItem("skew", selection, &synthWaveform[0], WAVEFORM_TRIANGLE_VARIABLE);
@@ -2818,7 +3225,7 @@ struct MenuItem tri1menuItem("triangle", selection, &synthWaveform[0], WAVEFORM_
 struct MenuItem pulse1menuItem("pulse", selection, &synthWaveform[0], WAVEFORM_BANDLIMIT_PULSE);
 struct MenuItem square1menuItem("square", selection, &synthWaveform[0], WAVEFORM_BANDLIMIT_SQUARE);
 struct MenuItem sine1menuItem("sine", selection, &synthWaveform[0], WAVEFORM_SINE);
-struct MenuItem oscillatorOff1menuItem("none", selection, &synthWaveform[0], WAVEFORM_NONE);
+struct MenuItem oscillatorOff1menuItem("disable", selection, &synthWaveform[0], WAVEFORM_NONE);
 
 struct MenuItem saw2menuItem("sawtooth", selection, &synthWaveform[1], WAVEFORM_BANDLIMIT_SAWTOOTH);
 struct MenuItem trilean2menuItem("skew", selection, &synthWaveform[1], WAVEFORM_TRIANGLE_VARIABLE);
@@ -2826,7 +3233,9 @@ struct MenuItem tri2menuItem("triangle", selection, &synthWaveform[1], WAVEFORM_
 struct MenuItem pulse2menuItem("pulse", selection, &synthWaveform[1], WAVEFORM_BANDLIMIT_PULSE);
 struct MenuItem square2menuItem("square", selection, &synthWaveform[1], WAVEFORM_BANDLIMIT_SQUARE);
 struct MenuItem sine2menuItem("sine", selection, &synthWaveform[1], WAVEFORM_SINE);
-struct MenuItem oscillatorOff2menuItem("none", selection, &synthWaveform[1], WAVEFORM_NONE);
+struct MenuItem oscillatorOff2menuItem("disable", selection, &synthWaveform[1], WAVEFORM_NONE);
+struct MenuItem oscillatorLevel2menuItem("level", &synthWaveformLevel[1]);
+struct MenuItem oscillatorInterval2menuItem("interval", keySelect, &synthWaveformOffsetKey[1]);
 
 struct MenuItem saw3menuItem("sawtooth", selection, &synthWaveform[2], WAVEFORM_BANDLIMIT_SAWTOOTH);
 struct MenuItem trilean3menuItem("skew", selection, &synthWaveform[2], WAVEFORM_TRIANGLE_VARIABLE);
@@ -2834,14 +3243,16 @@ struct MenuItem tri3menuItem("triangle", selection, &synthWaveform[2], WAVEFORM_
 struct MenuItem pulse3menuItem("pulse", selection, &synthWaveform[2], WAVEFORM_BANDLIMIT_PULSE);
 struct MenuItem square3menuItem("square", selection, &synthWaveform[2], WAVEFORM_BANDLIMIT_SQUARE);
 struct MenuItem sine3menuItem("sine", selection, &synthWaveform[2], WAVEFORM_SINE);
-struct MenuItem oscillatorOff3menuItem("none", selection, &synthWaveform[2], WAVEFORM_NONE);
+struct MenuItem oscillatorOff3menuItem("disable", selection, &synthWaveform[2], WAVEFORM_NONE);
+struct MenuItem oscillatorLevel3menuItem("level", &synthWaveformLevel[2]);
+struct MenuItem oscillatorInterval3menuItem("interval", keySelect, &synthWaveformOffsetKey[2]);
 
-struct MenuItem* waveform1menuItems[] = {&saw1menuItem, &trilean1menuItem, &tri1menuItem, &sine1menuItem, &square1menuItem, &pulse1menuItem, &oscillatorOff1menuItem};
-struct MenuItem* waveform2menuItems[] = {&saw2menuItem, &trilean2menuItem, &tri2menuItem, &sine2menuItem, &square2menuItem, &pulse2menuItem, &oscillatorOff2menuItem};
-struct MenuItem* waveform3menuItems[] = {&saw3menuItem, &trilean3menuItem, &tri3menuItem, &sine3menuItem, &square3menuItem, &pulse3menuItem, &oscillatorOff3menuItem};
+
+struct MenuItem* waveform1menuItems[] = {&oscillatorOff1menuItem, &saw1menuItem, &trilean1menuItem, &tri1menuItem, &sine1menuItem, &square1menuItem, &pulse1menuItem};
+struct MenuItem* waveform2menuItems[] = {&oscillatorOff2menuItem, &oscillatorLevel2menuItem, &oscillatorInterval2menuItem, &saw2menuItem, &trilean2menuItem, &tri2menuItem, &sine2menuItem, &square2menuItem, &pulse2menuItem};
+struct MenuItem* waveform3menuItems[] = {&oscillatorOff3menuItem, &oscillatorLevel3menuItem, &oscillatorInterval3menuItem, &saw3menuItem, &trilean3menuItem, &tri3menuItem, &sine3menuItem, &square3menuItem, &pulse3menuItem};
 
 struct MenuItem subtractiveEnableMenuItem("enable", toggle, &doSubtractiveSynth);
-
 
 struct MenuItem pluckMenuItem("pluck", &stringSynthPluck);
 struct MenuItem stringSynthDriveMenuItem("drive", &stringSynthDrive);
@@ -2860,20 +3271,24 @@ struct MenuItem reverbLowPassMenuItem("low pass", &reverbLowPass);
 struct MenuItem reverbDiffusionMenuItem("diffusion", &reverbDiffusion);
 
 struct MenuItem oscillator1Menu("oscillator 1", submenu, waveform1menuItems, 7);
-struct MenuItem oscillator2Menu("oscillator 2", submenu, waveform2menuItems, 7);
-struct MenuItem oscillator3Menu("oscillator 3", submenu, waveform3menuItems, 7);
+struct MenuItem oscillator2Menu("oscillator 2", submenu, waveform2menuItems, 9);
+struct MenuItem oscillator3Menu("oscillator 3", submenu, waveform3menuItems, 9);
 
 struct MenuItem subtractiveMenu("subtractive", submenu, &subtractiveEnableMenuItem, &oscillator1Menu, &oscillator2Menu, &oscillator3Menu);
 
 struct MenuItem stringSynthMenu("Karplus-Strong", submenu, &stringSynthMenuItems[0], 7);
 struct MenuItem reverbMenu("reverb", submenu, &reverbSizeMenuItem, &reverbHiDampMenuItem, &reverbLoDampMenuItem, &reverbLowPassMenuItem, &reverbDiffusionMenuItem);
 
-struct MenuItem synthMenu("internal synth", submenu, &subtractiveMenu, &reverbMenu, &stringSynthMenu);
+struct MenuItem synthMenu("internal synth", submenu, &subtractiveMenu, &stringSynthMenu, &reverbMenu);
 
 struct MenuItem* debugMenuItems[] = {&versionMenuItem, &debugShowResistancesMenuItem, &debugShowCalibrationMenuItem, &noteOnFirstMenuItem, &bendUpOnlyMenuItem, &bendDownOnlyMenuItem, &fontTestMenuItem, &lockMenuItem};
 struct MenuItem debugMenu("debug", submenu, &debugMenuItems[0], 8);
 
-struct MenuItem configMenu("settings", submenu, &outputMenu, &controlsMenu, &interfaceMenu, &synthMenu, &debugMenu);
+struct MenuItem* tuningMenuItems[] = {&octaveShiftMenuItem, &semitoneShiftMenuItem, &centsShiftMenuItem, &ratioSubsMenu, &quantizeMenuItem};
+struct MenuItem tuningMenu("tuning", submenu, &tuningMenuItems[0], 5);
+
+struct MenuItem* configMenuItems[] = {&synthMenu, &outputMenu, &controlsMenu, &interfaceMenu, &tuningMenu, &debugMenu};
+struct MenuItem configMenu("settings", submenu, &configMenuItems[0], 6);
 
 struct MenuItem saveMenuItem("save settings", saveAction);
 
@@ -2895,15 +3310,19 @@ void menuSetup() {
 #define bSetting(var) addSetting(#var, subsystem, I1, &var)
 
 void storedVariableSetup() {
-
   Subsystem subsystem = Synth;
-  addSetting("reverbSize", Synth, Flt, &reverbSize);
-
+  fltSetting(reverbSize);
+  fltSetting(reverbHiDamp);
+  fltSetting(reverbLoDamp);
+  fltSetting(reverbLowPass);
+  fltSetting(reverbDiffusion);
   i32Setting(synthWaveform[0]);
   i32Setting(synthWaveform[1]);
   i32Setting(synthWaveform[2]);
   fltSetting(synthWaveformOffset[1]);
   fltSetting(synthWaveformOffset[2]);
+  i32Setting(synthWaveformOffsetKey[1]);
+  i32Setting(synthWaveformOffsetKey[2]);
   fltSetting(synthWaveformLevel[1]);
   fltSetting(synthWaveformLevel[2]);
   bSetting(doStringSynth);
@@ -2914,6 +3333,15 @@ void storedVariableSetup() {
   fltSetting(stringSynthRegen);
   fltSetting(stringSynthRegenScale);
   fltSetting(stringSynthBrightnessCorrection);
+  i32Setting(leftButtonsControl);
+  i32Setting(centerButtonsControl);
+  i32Setting(rightButtonsControl);
+
+  subsystem = Interface;
+  bSetting(enableVisualizer);
+
+  subsystem = Controls;
+  //fltSetting(transpose); it's a double, not a float...
 
   loadSettings("settings");
 }
@@ -3196,6 +3624,7 @@ void loop() {
     delayMicroseconds(1000);
   }
 
+  controlButtonPairsUpdate(delta);
   synthUpdate(delta);
   mpeUpdate(delta);
 
@@ -3296,6 +3725,7 @@ void loop() {
 
   screenRedrawAge += delta;
 
+  checkTransposeUpdate();
   menuUpdate(delta);
 
   if (screenRedrawAge > maxRedrawAge) {
@@ -3313,7 +3743,7 @@ void loop() {
   } */
 
   if (verbose) {
-    Serial.println(String("MIDI Sent: ") + midiMsgsSent + " received: " + midiMsgsReceived + " vol release rate " + String(volumeReleaseRate) + " pressure exponent " + String(pressureExponent) + " pb +/- " + String(pbUp) + "  " + String(pbDown));
+    Serial.println(String("MIDI Sent: ") + midiMsgsSent + " received: " + midiMsgsReceived + " vol release rate " + String(volumeReleaseRate) + " pressure exponent " + String(pressureExponent) + " pb +/- " + String(pbUp) + "  " + String(pbDown) + " sus " + String(sustainPedal));
     Serial.println("Audio Memoory max blocks used: " + String(AudioMemoryUsageMax()));
   }
   iteration++;

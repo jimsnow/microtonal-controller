@@ -292,28 +292,53 @@ struct CharGlyph lockSymbol(8,
   0b11111111, 0b0);
 
 struct CharGlyph leftArrow(8,
-    0b0, 0b0,
-    0b0, 0b0,
-    0b0, 0b0,
-    0b00000000, 0b00010000,
-    0b00010000, 0b00100000,
-    0b00110000, 0b01000000,
-    0b01111110, 0b10000001,
-    0b00110000, 0b01000000,
-    0b00010000, 0b00100000,
-    0b00000000, 0b00010000);
+  0b0, 0b0,
+  0b0, 0b0,
+  0b0, 0b0,
+  0b00000000, 0b00010000,
+  0b00010000, 0b00100000,
+  0b00110000, 0b01000000,
+  0b01111110, 0b10000001,
+  0b00110000, 0b01000000,
+  0b00010000, 0b00100000,
+  0b00000000, 0b00010000);
 
-  struct CharGlyph rightArrow(8,
-    0b0, 0b0,
-    0b0, 0b0,
-    0b0, 0b0,
-    0b00000000, 0b00001000,
-    0b00001000, 0b00000100,
-    0b00001100, 0b00000010,
-    0b01111110, 0b10000001,
-    0b00001100, 0b00000010,
-    0b00001000, 0b00000100,
-    0b00000000, 0b00001000);
+struct CharGlyph rightArrow(8,
+  0b0, 0b0,
+  0b0, 0b0,
+  0b0, 0b0,
+  0b00000000, 0b00001000,
+  0b00001000, 0b00000100,
+  0b00001100, 0b00000010,
+  0b01111110, 0b10000001,
+  0b00001100, 0b00000010,
+  0b00001000, 0b00000100,
+  0b00000000, 0b00001000);
+
+struct CharGlyph flatSymbol(6,
+  0b000000, 0b0,
+  0b100000, 0b0,
+  0b100000, 0b0,
+  0b100000, 0b0,
+  0b100000, 0b0,
+  0b100000, 0b000000,
+  0b101110, 0b010001,
+  0b110001, 0b001010,
+  0b100010, 0b000101,
+  0b111100, 0b000010);
+
+struct CharGlyph centSymbol(7,
+  0b0, 0b0,
+  0b0, 0b0,
+  0b0001000, 0b0,
+  0b0111110, 0b1000001,
+  0b1001001, 0b0100010,
+  0b1001000, 0b0000000,
+  0b1001000, 0b0000000,
+  0b1001001, 0b0100010,
+  0b0111110, 0b1000001,
+  0b0001000, 0b0000000);
+
 
 int charSpacing = 2;
 int fontLookBack = 5; /* If a font has pixels up to this far to the left of where "width" implies, we draw those too. */
@@ -396,7 +421,13 @@ struct CharGlyph* glyphLookup(const char *s, int *i, bool *vFlip = nullptr, bool
       if (vFlip != nullptr) {
         *vFlip = true;
       }
-    } else {
+    } else if (strncmp(&s[*i+1], "flat", 4) == 0) {
+      g = &flatSymbol;
+      *i += 4;
+    } else if (strncmp(&s[*i+1], "cent", 4) == 0) {
+      g = &centSymbol;
+      *i += 4;
+    }else {
       g = &glyphs[int(s['\\'])];
     }
   } else {
@@ -458,7 +489,7 @@ int drawChars(ILI9341_t3 *tft, const char *s, uint16_t fgColor, uint16_t midColo
     xOrigin += drawGlyph(tft, g, xOrigin, yOrigin, fgColor, midColor, bgColor, vFlip, hFlip);
     xOrigin += charSpacing;
 
-    Serial.println("draw char " + String(s[i]) + " at " + String(xOrigin) + "," + String(yOrigin));
+    //Serial.println("draw char " + String(s[i]) + " at " + String(xOrigin) + "," + String(yOrigin));
 
     i++;
   }
@@ -788,7 +819,7 @@ void fontSetup() {
     0b0, 0b0,
     0b11111, 0b0,
     0b00010, 0b00101,
-    0b00101, 0b01010,
+    0b00100, 0b01010,
     0b01000, 0b10100,
     0b11111, 0b0);
 
@@ -809,7 +840,7 @@ mkChar('A', 7,
     0b1000001, 0b0000010,
     0b1000001, 0b0000010,
     0b1000010, 0b0000101,
-    0b1111110, 0b0000001,
+    0b1111110, 0b0000000,
     0b1000001, 0b0000010,
     0b1000001, 0b0000010,
     0b1111110, 0b0000001);

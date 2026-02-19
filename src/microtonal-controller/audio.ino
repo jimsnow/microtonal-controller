@@ -86,7 +86,7 @@ struct SynthVoice {
   float frequency;  // in hz, as of when the note began
   float filterAmount;
   AudioSynthKarplusStrongerModulated *string;
-  int lastSynthWaveform[oscillators];
+  uint32_t lastSynthWaveform[oscillators];
 };
 
 struct SynthVoice voices[synthVoices] = {};

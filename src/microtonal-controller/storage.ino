@@ -78,14 +78,14 @@ LittleFS_Program fs;
 struct Setting {
   
   bool unSaved() {
-    if (!active) {
-      return false;
-    }
+    void *vp;
     switch (type) {
+      case I32:
       case U32:
         return value != *((uint32_t*)(location));
       case Flt:
-        return *reinterpret_cast<float*>(&value) != *((float*)(location));
+        vp = &value;
+        return *((float*)(vp)) != *((float*)(location));
       case I1:
         return value != *((bool*)(location));
       default:
@@ -95,6 +95,7 @@ struct Setting {
 
   uint32_t readValue() {
     switch (type) {
+      case I32:
       case U32:
         return *((uint32_t*)location);
       case Flt:
@@ -118,7 +119,6 @@ struct Setting {
   SettingType type = None;
   uint32_t value;  /* last value stored */
   void* location;
-  bool active;
 };
 
 #define settingsTableSize 128
@@ -139,10 +139,10 @@ void addSetting(String varName, Subsystem subsystem, SettingType type, void* loc
   s->subsystem = subsystem;
   s->type = type;
   s->location = location;
-  s->active = true;
 
   s->value = s->readValue();
 
+  Serial.println("adding " + showSubsystem(subsystem) + " setting " + varName);
 
   numSettings++;
 }
@@ -150,12 +150,13 @@ void addSetting(String varName, Subsystem subsystem, SettingType type, void* loc
 uint32_t readSetting(struct Setting *s) {
   switch (s->type) {
     case U32:
-      return *((uint32_t*)(s->location));
+    case I32:
     case Flt:
       return *((uint32_t*)(s->location));
     case I1:
       return *((bool*)(s->location));
     default:
+      Serial.println("unexpected type " + String(s->type));
       return 0;
   }
 }
@@ -190,6 +191,21 @@ void loadSettings(String name) {
   file.close();
 }
 
+void printSettings(String name) {
+  struct Setting s;
+  File file = fs.open(name.c_str(), FILE_READ);
+  if (!file) {
+    Serial.println("could not open file " + name);
+    return;
+  }
+
+  while(file.available()) {
+    String line = file.readStringUntil('\n');
+    Serial.println(line);
+  }
+  file.close();
+}
+
 void applySetting(const char* subsystem, const char* varName, double value, const char* type) {
   bool match = false;
   //Serial.println("applySetting: numSettings = " + String(numSettings));
@@ -200,6 +216,10 @@ void applySetting(const char* subsystem, const char* varName, double value, cons
     if (strcmp(varName, setting->name.c_str()) == 0) {
       Serial.println("match on " + setting->name);
       switch (setting->type) {
+        case I32:
+          *((int32_t*)(setting->location)) = (int32_t)value;
+          setting->value = setting->readValue();
+          break;
         case U32:
           *((uint32_t*)(setting->location)) = (uint32_t)value;
           setting->value = setting->readValue();
@@ -227,12 +247,13 @@ void applySetting(const char* subsystem, const char* varName, double value, cons
   }
 }
 
-void saveAllSettings(String fileName) {
+int saveAllSettings(String fileName) {
+  int saved = 0;
   File file = fs.open(fileName.c_str(), FILE_WRITE); /* default behavior for writes seems to be to seek to the end */
 
   if (!file) {
     Serial.println("unable to open file " + fileName);
-    return;
+    return 0;
   }
 
   for (int i=0; i < numSettings; i++) {
@@ -244,11 +265,15 @@ void saveAllSettings(String fileName) {
       Serial.println(showSubsystem(setting->subsystem) + " " + setting->name + " = " + setting->showValue() + " " + showSettingType(setting->type));
 
       setting->value = readSetting(setting);
+      saved++;
     } else {
-      //Serial.println("not saving " + setting->name + " (no changes)");
+      Serial.println("not saving " + setting->name + " (no changes) saved value: "  + setting->showValue() + " current value: " + readSetting(setting));
     }
   }
   file.close();
+
+  Serial.println(String(saved) + " settings saved");
+  return saved;
 }
 
 void storageSetup() {

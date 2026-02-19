@@ -417,8 +417,8 @@ void menuSelect(struct MenuItem *item, uint16_t button) {
     }
   }
 
-  if (item->type == value) {
-    windows[visualizerWindow].textC = "\\leftkey " + String(*(uint32_t *)(item->data)) + " \\rightkey";
+  if (item->type == value || item->type == signedValue) {
+    windows[visualizerWindow].textC = "\\leftkey " + String(*(int32_t *)(item->data)) + " \\rightkey";
     windows[visualizerWindow].enabled = true;
     editItem = item;
     windows[visualizerWindow].redraw = true;
@@ -426,6 +426,16 @@ void menuSelect(struct MenuItem *item, uint16_t button) {
     windows[visualizerWindow].textC = "\\leftkey " + String(*(float*)(item->data), 3) + " \\rightkey";
     windows[visualizerWindow].enabled = true;
     editItem = item;
+    windows[visualizerWindow].redraw = true;
+  } else if (item->type == keySelect) {
+    editItem = item;
+    if (item->data == nullptr) {
+      windows[visualizerWindow].textC = "press a key";
+    } else {
+      struct Key *key = &keys[*(int32_t *)item->data];
+      windows[visualizerWindow].textC = String(key->originalPitch.ratio.a) + "/" + String(key->originalPitch.ratio.b);
+    }
+    windows[visualizerWindow].enabled = true;
     windows[visualizerWindow].redraw = true;
   } else if (windows[visualizerWindow].enabled == true) {
     editItem = nullptr;
@@ -580,6 +590,8 @@ void incrementMenuValue() {
 
   if (editItem->type == value) {
     incrementIntValue();
+  } else if (editItem->type == signedValue) {
+    incrementSignedIntValue();
   } else if (editItem->type == floatValue) {
     incrementFloatValue();
   }
@@ -592,6 +604,8 @@ void decrementMenuValue() {
 
   if (editItem->type == value) {
     decrementIntValue();
+  } else if (editItem->type == signedValue) {
+    decrementSignedIntValue();
   } else if (editItem->type == floatValue) {
     decrementFloatValue();
   }
@@ -612,6 +626,28 @@ void decrementIntValue() {
   auto val = *(uint32_t*)(editItem->data);
 
   if (editItem->minValue == nullptr || val > *editItem->minValue) {
+    val--;
+    windows[visualizerWindow].textC = "\\leftkey " + String(val) + " \\rightkey";
+    *(uint32_t*)(editItem->data) = val;
+    windows[visualizerWindow].redraw = true;
+  }
+}
+
+void incrementSignedIntValue() {
+  auto val = *(int32_t*)(editItem->data);
+
+  if (editItem->maxValue == nullptr || val < (int32_t)*editItem->maxValue) {
+    val++;
+    windows[visualizerWindow].textC = "\\leftkey " + String(val) + " \\rightkey";
+    *(uint32_t*)(editItem->data) = val;
+    windows[visualizerWindow].redraw = true;
+  }
+}
+
+void decrementSignedIntValue() {
+  auto val = *(int32_t*)(editItem->data);
+
+  if (editItem->minValue == nullptr || val > (int32_t)*editItem->minValue) {
     val--;
     windows[visualizerWindow].textC = "\\leftkey " + String(val) + " \\rightkey";
     *(uint32_t*)(editItem->data) = val;
@@ -640,6 +676,25 @@ void decrementFloatValue() {
     windows[visualizerWindow].textC = "\\leftkey " + String(val, 3) + " \\rightkey";
     *(float*)(editItem->data) = val;
     windows[visualizerWindow].redraw = true;
+  }
+}
+
+void handleNewKeyPress(Key *key) {
+  if (editItem == nullptr) {
+    return;
+  }
+
+  if (editItem->type == keySelect) {
+    *(int32_t*)(editItem->data) = key->index;
+    windows[visualizerWindow].textC = String(key->originalPitch.ratio.a) + "/" + String(key->originalPitch.ratio.b);
+    windows[visualizerWindow].redraw = true;
+
+    Serial.println("selected interval " + windows[visualizerWindow].textC);
+
+    for (int i = 0; i < oscillators; i++) {
+      synthWaveformOffset[i] = keys[synthWaveformOffsetKey[i]].originalPitch.asDouble();
+      //Serial.println("set osc " + String(i) + " offset to " + synthWaveformOffset[i] + ", " + synthWaveformOffsetKey[i]->originalPitch.ratio.a + "/" + synthWaveformOffsetKey[i]->originalPitch.ratio.b);
+    }
   }
 }
 

@@ -47,7 +47,8 @@ enum Subsystem {
   Controls,
   Midi,
   Synth,
-  Tuning
+  Tuning,
+  Interface
 };
 
 static inline String showSubsystem(Subsystem s) {
@@ -57,6 +58,7 @@ static inline String showSubsystem(Subsystem s) {
     case Midi: return "midi";
     case Synth: return "synth";
     case Tuning: return "tuning";
+    case Interface: return "interface";
     default: return "invalid";
   }
 }
